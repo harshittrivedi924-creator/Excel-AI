@@ -33,6 +33,12 @@ class Validator:
         "FIND_EMPTY",
         "CHART",
         "ANALYZE",
+        "SUMIF",
+        "COUNTIF",
+        "AVERAGEIF",
+        "STANDARDIZE_DATES",
+        "STANDARDIZE_NAMES",
+        "DETECT_INVALID",
     }
 
     def __init__(self, excel_handler):

@@ -69,6 +69,28 @@ class CommandParser:
         "analyze": "ANALYZE",
         "analyse": "ANALYZE",
         "report bana": "ANALYZE",
+        "sumif": "SUMIF",
+        "sumifs": "SUMIF",
+        "countif": "COUNTIF",
+        "countifs": "COUNTIF",
+        "averageif": "AVERAGEIF",
+        "averageifs": "AVERAGEIF",
+        "standardize dates": "STANDARDIZE_DATES",
+        "dates ko standardize": "STANDARDIZE_DATES",
+        "dates standardize": "STANDARDIZE_DATES",
+        "dates normalize": "STANDARDIZE_DATES",
+        "normalize dates": "STANDARDIZE_DATES",
+        "standardize names": "STANDARDIZE_NAMES",
+        "names ko standardize": "STANDARDIZE_NAMES",
+        "names standardize": "STANDARDIZE_NAMES",
+        "names normalize": "STANDARDIZE_NAMES",
+        "capitalize names": "STANDARDIZE_NAMES",
+        "invalid values": "DETECT_INVALID",
+        "invalid value": "DETECT_INVALID",
+        "invalid data": "DETECT_INVALID",
+        "galt data": "DETECT_INVALID",
+        "galtiyan": "DETECT_INVALID",
+        "detect invalid": "DETECT_INVALID",
         "calculate": None,
     }
 
@@ -87,6 +109,20 @@ class CommandParser:
     def parse(self, command):
         """Parse a natural language command into a structured instruction."""
         command = self._normalize(command)
+
+        # Conditional aggregates take priority: a command with
+        # "jahan"/"where" plus a SUM/AVERAGE/COUNT keyword is conditional,
+        # even when other words (e.g. "product") collide with op keywords.
+        if "jahan" in command or "where" in command:
+            agg = None
+            for kw, op in self.OPERATION_KEYWORDS.items():
+                if op in ("SUM", "AVERAGE", "COUNT") and kw in command:
+                    agg = op
+                    break
+            if agg is not None:
+                op = {"SUM": "SUMIF", "COUNT": "COUNTIF",
+                      "AVERAGE": "AVERAGEIF"}[agg]
+                return self._parse_conditional(command, op)
 
         # Check for a cell reference in the form like B2
         cells = re.findall(r"\b([a-z])\s*(\d+)\b", command)
@@ -113,6 +149,13 @@ class CommandParser:
                 "divide, difference, or percentage."
             )
 
+        # Conditional calculations: "jahan"/"where" clause with an aggregate
+        if operation in ("SUM", "AVERAGE", "COUNT", "SUMIF", "COUNTIF",
+                         "AVERAGEIF"):
+            if operation in ("SUMIF", "COUNTIF", "AVERAGEIF") or "jahan" in command \
+                    or "where" in command:
+                return self._parse_conditional(command, operation)
+
         # Whole-sheet operations: "Sabka sum kar do"
         if operation in ("SUM", "AVERAGE", "MIN", "MAX", "COUNT", "PERCENTAGE"):
             if any(w in command for w in self.WHOLE_SHEET_WORDS) and not cells:
@@ -134,7 +177,9 @@ class CommandParser:
 
         # Data operations
         if operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY",
-                         "CHART", "ANALYZE"):
+                         "CHART", "ANALYZE",
+                         "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
+                         "DETECT_INVALID"):
             return self._parse_data_operation(command, operation, cells,
                                               named, column_matches, numbers)
 
@@ -371,7 +416,9 @@ class CommandParser:
                     "column": column,
                     "whole_sheet": column is None}
 
-        if operation in ("SORT", "DEDUPE", "FIND_EMPTY", "FILTER", "CHART"):
+        if operation in ("SORT", "DEDUPE", "FIND_EMPTY", "FILTER", "CHART",
+                         "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
+                         "DETECT_INVALID"):
             if operation == "FILTER" and operator is None:
                 raise ParserError(
                     "I couldn't find a filter condition. Try something like "
@@ -393,6 +440,130 @@ class CommandParser:
             }
 
         raise ParserError(f"I couldn't understand the {operation} command.")
+
+    def _parse_conditional(self, command, operation):
+        """Parse a command with a 'jahan'/where clause into a conditional
+        calculation (SUMIF / COUNTIF / AVERAGEIF).
+
+        Examples:
+          - "Column B ka sum karo jahan A Pen hai"
+          - "Revenue ka average karo jahan month March hai"
+          - "Count karo jahan B 100 se zyada"
+          - "B ka sum karo jahan A Pen hai aur C 50 se kam"
+        """
+        operation = {"SUM": "SUMIF", "COUNT": "COUNTIF",
+                     "AVERAGE": "AVERAGEIF"}.get(operation, operation)
+        destination = self._find_destination(command)
+        target_col = None
+
+        head = command
+        tail = command
+        m = re.search(r"\b(jahan|where)\b", command)
+        if m:
+            head = command[:m.start()]
+            tail = command[m.end():]
+
+        # The target column comes from the head of the command.
+        col_match = re.search(r"\bcolumn\s+([a-z])\b", head)
+        if col_match:
+            target_col = col_match.group(1).upper()
+        else:
+            head_bare = re.findall(r"\b([a-hj-z])\b", head)
+            if head_bare:
+                target_col = head_bare[0].upper()
+            else:
+                named = self._extract_named_operands(head)
+                if named:
+                    target_col = named[0]
+
+        # For COUNTIF there may be no explicit target column.
+        criteria = self._parse_condition_clauses(tail)
+        if not criteria:
+            raise ParserError(
+                "I couldn't find a condition. Try something like "
+                "'B ka sum karo jahan A Pen hai' or 'B ka sum karo "
+                "jahan A 100 se zyada'."
+            )
+
+        # COUNTIF can count over the criteria column itself.
+        if operation == "COUNTIF" and target_col is None:
+            target_col = criteria[0][0]
+
+        if target_col is None:
+            raise ParserError(
+                "Please specify which column to calculate, like "
+                "'Column B ka sum karo jahan Price 100 se zyada'."
+            )
+
+        return {
+            "operation": operation,
+            "sum_range": target_col,
+            "criteria": criteria,
+            "destination": destination,
+        }
+
+    def _parse_condition_clauses(self, tail):
+        """Parse one-or-more conditions from the tail of a command.
+        Each condition is (column, operator, value) where column may be a
+        letter or a named label, and value may be a number or text.
+        """
+        clauses = re.split(r"\b(?:aur|and)\b", tail)
+        criteria = []
+        for clause in clauses:
+            cond = self._parse_condition_clause(clause)
+            if cond:
+                criteria.append(cond)
+        return criteria
+
+    def _parse_condition_clause(self, clause):
+        """Parse a single condition clause into (column, operator, value)."""
+        clause = clause.strip().strip(",. -")
+        if not clause:
+            return None
+
+        # Numeric comparisons with symbols: "B>100", "Price >= 100"
+        m = re.search(r"(\w+)\s*(>=|<=|==|=|>|<)\s*(-?[\d.]+)\b", clause)
+        if m:
+            return self._cond_operand(m.group(1)), m.group(2), float(m.group(3))
+
+        # Hinglish: "B 100 se zyada", "Price 1000 se kam"
+        m = re.search(r"(\w+)\s+([\d.]+)\s+se\s+(zyada|kam|barabar)\b", clause)
+        if m:
+            op = {"zyada": ">", "kam": "<", "barabar": "=="}[m.group(3)]
+            return self._cond_operand(m.group(1)), op, float(m.group(2))
+
+        # Hinglish: "B zyada 100", "Price kam 1000"
+        m = re.search(r"(\w+)\s+(zyada|kam|barabar)\s+([\d.]+)\b", clause)
+        if m:
+            op = {"zyada": ">", "kam": "<", "barabar": "=="}[m.group(2)]
+            return self._cond_operand(m.group(1)), op, float(m.group(3))
+
+        # Text equality in Hinglish: "A Pen hai", "Product Pen hai"
+        m = re.search(r"(\w+)\s+(?:ke?\s+)?(?:mein|me)\s+([\w.\-]+)\s+(?:hai|ho|hain)\b", clause)
+        if m:
+            return self._cond_operand(m.group(1)), "==", m.group(2)
+
+        # Simpler Hinglish equality: "A Pen hai"
+        m = re.search(r"(\w+)\s+([\w.\-]+)\s+(?:hai|ho|hain)\b", clause)
+        if m:
+            return self._cond_operand(m.group(1)), "==", m.group(2)
+
+        # Plain text equality: "A = Pen", "A Pen", "A equals Pen"
+        m = re.search(r"(\w+)\s*(?:==|=|equals|ke barabar)\s*([\w.\-]+)\b", clause)
+        if m:
+            return self._cond_operand(m.group(1)), "==", m.group(2)
+
+        # Hinglish bare equality: "jahan Product Pen"
+        tokens = clause.split()
+        if len(tokens) == 2 and tokens[0] != "column":
+            return self._cond_operand(tokens[0]), "==", tokens[1]
+
+        return None
+
+    @staticmethod
+    def _cond_operand(token):
+        """Trim filler words from a condition column token."""
+        return token.strip(":;,").lower()
 
     def _parse_filter_condition(self, command, column):
         """Parse a filter condition into (column, operator, value).

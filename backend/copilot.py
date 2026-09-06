@@ -78,9 +78,16 @@ class ExcelCopilot:
                     instruction, sheet_name, allow_overwrite
                 )
 
-            elif operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY"):
+            elif operation in ("SUMIF", "COUNTIF", "AVERAGEIF"):
+                result, destination, written_count = self._handle_conditional(
+                    instruction, sheet_name, allow_overwrite
+                )
+
+            elif operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY",
+                               "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
+                               "DETECT_INVALID"):
                 result, written_count = self._handle_data_operation(
-                    instruction, sheet_name
+                    instruction, sheet_name, allow_overwrite
                 )
 
             elif operation == "CHART":
@@ -357,12 +364,144 @@ class ExcelCopilot:
             "like 'Sales ka percentage karma karo'."
         )
 
+    def _handle_conditional(self, instruction, sheet_name=None,
+                            allow_overwrite=False):
+        """Handle SUMIF / COUNTIF / AVERAGEIF.
+
+        The instruction carries:
+          - sum_range:   column to aggregate (letter or name)
+          - criteria:    list of (column, operator, value)
+        Evaluates all criteria against the data rows and aggregates the
+        matching cells of the sum range.
+        """
+        operation = instruction["operation"]
+        sum_range = instruction.get("sum_range")
+        criteria = instruction.get("criteria") or []
+
+        if not self.excel.workbook:
+            raise ValidationError("No workbook loaded.")
+        if not sum_range:
+            raise ParserError("Please specify which column to calculate.")
+        if not criteria:
+            raise ParserError("I couldn't find any conditions for the calculation.")
+
+        sheet = self.excel.get_sheet(sheet_name)
+        rows = self.excel._read_rows(sheet)
+        if not rows:
+            raise ValidationError("This sheet has no data.")
+        data = rows[1:]
+
+        sum_col = self._resolve_named_column(sum_range, sheet_name)
+        sum_idx = self.excel.get_column_number(sum_col)
+
+        # Resolve criteria columns and values, building a combined mask.
+        mask = [True] * len(data)
+        used_letters = []
+        for crit in criteria:
+            crit_col, operator, value = crit
+            if crit_col is None:
+                continue
+            crit_letter = self._resolve_named_column(crit_col, sheet_name)
+            used_letters.append(crit_letter)
+            idx = self.excel.get_column_number(crit_letter)
+
+            if isinstance(value, str):
+                try:
+                    value = float(value)
+                except ValueError:
+                    value = value.lower()
+
+            for i, row in enumerate(data):
+                cell_value = row[idx - 1] if idx <= len(row) else None
+                cv = self._coerce(cell_value)
+                numeric = isinstance(cv, (int, float))
+                if operator == ">":
+                    ok = numeric and cv > value
+                elif operator == "<":
+                    ok = numeric and cv < value
+                elif operator == ">=":
+                    ok = numeric and cv >= value
+                elif operator == "<=":
+                    ok = numeric and cv <= value
+                elif operator == "==":
+                    ok = str(cv).lower() == str(value).lower()
+                else:
+                    ok = False
+                mask[i] = mask[i] and ok
+
+        # Aggregate matching values from the sum range.
+        values = []
+        for i, row in enumerate(data):
+            if mask[i]:
+                cell_value = row[sum_idx - 1] if sum_idx <= len(row) else None
+                cv = self._coerce(cell_value)
+                if isinstance(cv, (int, float)):
+                    values.append(cv)
+
+        matched = sum(1 for keep in mask if keep)
+
+        from backend.calculator.engine import CalculationEngine
+        if operation == "SUMIF":
+            result = CalculationEngine.sum(values)
+        elif operation == "AVERAGEIF":
+            result = CalculationEngine.average(values)
+        elif operation == "COUNTIF":
+            result = CalculationEngine.count_if(mask)
+        else:
+            raise ParserError(f"Unsupported conditional operation: {operation}")
+
+        instruction["values"] = values
+        instruction["mask"] = mask
+        instruction["criteria_letters"] = used_letters
+        instruction["sum_range_letter"] = sum_col
+        instruction["matched"] = matched
+
+        destination = instruction.get("destination")
+        if destination:
+            self.validator.validate_destination(destination, sheet_name,
+                                                allow_overwrite)
+            crit = criteria[0]
+            crit_letter = self._resolve_named_column(crit[0], sheet_name)
+            if operation == "COUNTIF":
+                formula = f"=COUNTIF({crit_letter}:{crit_letter},{self._formula_criteria(crit)})"
+            else:
+                formula = (
+                    f"={operation}({crit_letter}:{crit_letter},"
+                    f"{self._formula_criteria(crit)},"
+                    f"{sum_col}:{sum_col})"
+                )
+            self.excel.write_formula(destination, formula, sheet_name)
+            instruction["formula"] = formula
+
+        return result, destination, matched
+
+    @staticmethod
+    def _formula_criteria(cond):
+        """Render a parsed condition into an Excel criteria argument."""
+        column, operator, value = cond
+        sym = {"==": "=", ">": ">", "<": "<", ">=": ">=", "<=": "<="}[operator]
+        if isinstance(value, str):
+            return f'"{value}"'
+        return f'{sym}{value}'
+
+    @staticmethod
+    def _coerce(v):
+        """Coerce a cell value for comparisons."""
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                return v.lower()
+        return v
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
 
-    def _handle_data_operation(self, instruction, sheet_name=None):
-        """Handle SORT / DEDUPE / FILTER / FIND_EMPTY. Returns (result, count)."""
+    def _handle_data_operation(self, instruction, sheet_name=None,
+                               allow_overwrite=False):
+        """Handle SORT / DEDUPE / FILTER / FIND_EMPTY and data cleaning
+        operations. Returns (result, count)."""
         operation = instruction["operation"]
         column = instruction.get("column")
 
@@ -389,8 +528,27 @@ class ExcelCopilot:
             return {"column": col_letter, "rows": count}, count
 
         elif operation == "DEDUPE":
-            count = self.excel.remove_duplicates(sheet_name)
-            return {"removed": count}, count
+            count, removed_rows = self.excel.remove_duplicates(sheet_name)
+            return {"removed": count, "preview": removed_rows[:3]}, count
+
+        elif operation == "STANDARDIZE_DATES":
+            col_letter = col_letter or None
+            converted, total = self.excel.standardize_dates(
+                col_letter, sheet_name
+            )
+            return {"converted": converted, "total": total}, converted
+
+        elif operation == "STANDARDIZE_NAMES":
+            converted, checked = self.excel.standardize_names(
+                col_letter, sheet_name
+            )
+            return {"converted": converted, "checked": checked}, converted
+
+        elif operation == "DETECT_INVALID":
+            issues, candidates = self.excel.detect_invalid_values(
+                col_letter, sheet_name
+            )
+            return {"count": len(issues), "issues": issues[:50]}, len(issues)
 
         elif operation == "FILTER":
             operator = instruction.get("operator")
@@ -435,8 +593,9 @@ class ExcelCopilot:
         for sheet_title, data in report.items():
             metrics = data["metrics"]
             trends = data["trends"]
+            anomalies = data.get("anomalies", [])
             summary.append(f"Sheet: {sheet_title}")
-            if not metrics and not trends:
+            if not metrics and not trends and not anomalies:
                 summary.append("  No numeric data to analyze.")
                 continue
             for m in metrics:
@@ -448,6 +607,13 @@ class ExcelCopilot:
                 total_insights += 1
             for t in trends:
                 summary.append(f"  Trend: {t}")
+            for label, value, mean, stdev, i in anomalies:
+                summary.append(
+                    f"  Anomaly: {label} {value} is "
+                    f"{abs(value - mean) / stdev:.1f} std devs from the "
+                    f"average ({mean:.2f})"
+                )
+                total_insights += 1
 
         self._write_analysis_sheet("\n".join(summary), sheet_name)
         return {"sheets": list(report.keys()), "insights": total_insights,
@@ -604,10 +770,18 @@ class ExcelCopilot:
                 + (f" by column {col}." if col else ".")
             )
         if op == "DEDUPE":
+            if not written_count:
+                return "No duplicate rows were found."
+            r = result if isinstance(result, dict) else {}
+            preview = r.get("preview", [])
+            preview_text = ""
+            if preview:
+                sample = " | ".join(", ".join(str(v) for v in row)
+                                    for row in preview[:2])
+                preview_text = f" Example removed rows: {sample}."
             return (
                 f"Done. I removed {written_count} duplicate row(s)."
-                if written_count
-                else "No duplicate rows were found."
+                f"{preview_text}"
             )
         if op == "FILTER":
             r = result if isinstance(result, dict) else {}
@@ -625,6 +799,43 @@ class ExcelCopilot:
             preview = ", ".join(cells[:10])
             more = f" and {written_count - 10} more" if len(cells) > 10 else ""
             return f"Found {written_count} empty cell(s): {preview}{more}."
+        if op == "STANDARDIZE_DATES":
+            r = result if isinstance(result, dict) else {}
+            return (
+                f"Done. I standardized {r.get('converted', 0)} date(s) "
+                f"to DD-MM-YYYY format."
+            )
+        if op == "STANDARDIZE_NAMES":
+            r = result if isinstance(result, dict) else {}
+            return (
+                f"Done. I title-cased {r.get('converted', 0)} name(s)."
+            )
+        if op == "DETECT_INVALID":
+            if not written_count:
+                return "No invalid values were found."
+            r = result if isinstance(result, dict) else {}
+            issues = r.get("issues", [])
+            preview = "; ".join(
+                f"{ref} ({why})" for ref, why in issues[:8]
+            )
+            more = f" and {written_count - 8} more" if len(issues) > 8 else ""
+            return (
+                f"Found {written_count} invalid value(s): {preview}{more}."
+            )
+        if op in ("SUMIF", "COUNTIF", "AVERAGEIF"):
+            matched = instruction.get("matched", 0)
+            agg = {"SUMIF": "summed", "COUNTIF": "counted",
+                   "AVERAGEIF": "averaged"}[op]
+            crits = instruction.get("criteria", [])
+            desc = " and ".join(
+                f"{c[0]} {c[1]} {c[2]}" for c in crits
+            )
+            if destination:
+                return (
+                    f"Done. I {agg} {matched} matching cell(s) where {desc} "
+                    f"and placed the result in {destination}."
+                )
+            return f"Done. I {agg} {matched} matching cell(s) where {desc} = {result}."
         if op == "CHART":
             r = result if isinstance(result, dict) else {}
             return (

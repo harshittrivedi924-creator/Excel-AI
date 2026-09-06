@@ -72,3 +72,30 @@ class CalculationEngine:
         if old == 0:
             raise ValueError("Old value cannot be zero for growth")
         return ((new - old) / old) * 100
+
+    @staticmethod
+    def sum_if(values, mask):
+        """Sum values where mask is True."""
+        return sum(v for v, keep in zip(values, mask) if keep)
+
+    @staticmethod
+    def average_if(values, mask):
+        """Average values where mask is True."""
+        matched = [v for v, keep in zip(values, mask) if keep]
+        if not matched:
+            return 0
+        return sum(matched) / len(matched)
+
+    @staticmethod
+    def count_if(mask):
+        """Count positions where mask is True."""
+        return sum(1 for keep in mask if keep)
+
+    @staticmethod
+    def standard_deviation(values):
+        """Sample standard deviation of a list of numbers."""
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        return variance ** 0.5

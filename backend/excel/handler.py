@@ -1,3 +1,6 @@
+from datetime import datetime, date
+import re
+
 import openpyxl
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.chart import BarChart, LineChart, Reference
@@ -254,26 +257,28 @@ class ExcelHandler:
 
     def remove_duplicates(self, sheet_name=None):
         """Remove fully-duplicate rows, keeping the first occurrence.
-        Returns the number of removed rows.
+        Returns (removed_count, list_of_removed_rows).
         """
         sheet = self.get_sheet(sheet_name)
         rows = self._read_rows(sheet)
         if not rows:
-            return 0
+            return 0, []
         header = rows[0]
         data = rows[1:]
 
         seen = set()
         unique = []
+        removed = []
         for row in data:
             signature = tuple(repr(v) for v in row)
             if signature in seen:
+                removed.append(row)
                 continue
             seen.add(signature)
             unique.append(row)
 
         self._write_rows(sheet, [header] + unique)
-        return len(data) - len(unique)
+        return len(data) - len(unique), removed
 
     def filter_rows(self, column, operator, value, sheet_name=None):
         """Filter rows by a condition on a column.
@@ -351,6 +356,172 @@ class ExcelHandler:
                 if sheet.cell(row=row, column=col).value is None:
                     empty.append(f"{get_column_letter(col)}{row}")
         return empty
+
+    # ------------------------------------------------------------------ #
+    # Data cleaning (Phase 11)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _parse_date(text):
+        """Best-effort parse of a date string into a datetime.date.
+        Returns None if the text is not a recognizable date.
+        """
+        text = str(text).strip()
+        for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
+                    "%d-%m-%y", "%d/%m/%y", "%m/%d/%Y", "%d %b %Y",
+                    "%b %d, %Y", "%B %d, %Y", "%d %B %Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                pass
+        m = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", text)
+        if m:
+            day, month, year = map(int, m.groups())
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                year = year + 2000 if year < 100 else year
+                try:
+                    return date(year, month, day)
+                except ValueError:
+                    return None
+        return None
+
+    def standardize_dates(self, column=None, sheet_name=None):
+        """Rewrite date-like cells to a consistent DD-MM-YYYY format.
+        Returns the number of cells converted.
+        """
+        sheet = self.get_sheet(sheet_name)
+        count = 0
+        cols = range(sheet.min_column, sheet.max_column + 1)
+        if column is not None:
+            cols = [self.get_column_number(column)]
+
+        for col in cols:
+            for row in range(sheet.min_row, sheet.max_row + 1):
+                cell = sheet.cell(row=row, column=col)
+                value = cell.value
+                parsed = None
+                if isinstance(value, datetime):
+                    parsed = value.date()
+                elif isinstance(value, date):
+                    parsed = value
+                elif isinstance(value, str):
+                    parsed = self._parse_date(value)
+                if parsed is None:
+                    continue
+                cell.value = parsed.strftime("%d-%m-%Y")
+                count += 1
+        return count, count
+
+    @staticmethod
+    def _is_name_header(text):
+        header = str(text).strip().lower()
+        return header in ("name", "names", "naam", "customer",
+                          "customername", "client", "product",
+                          "employee", "person", "user")
+
+    def standardize_names(self, column=None, sheet_name=None):
+        """Title-case text cells in the first name-like column
+        (or the requested column). Returns (converted, total_checked).
+        """
+        sheet = self.get_sheet(sheet_name)
+        target_col = column
+
+        if target_col is None:
+            for col in range(sheet.min_column, sheet.max_column + 1):
+                header = sheet.cell(row=sheet.min_row, column=col).value
+                if header and self._is_name_header(header):
+                    target_col = get_column_letter(col)
+                    break
+        if target_col is None:
+            # Fall back to the first non-numeric, non-header column with text.
+            for col in range(sheet.min_column, sheet.max_column + 1):
+                if col == 1 and sheet.max_column > 1:
+                    continue
+                for row in range(sheet.min_row + 1, sheet.max_row + 1):
+                    v = sheet.cell(row=row, column=col).value
+                    if isinstance(v, str) and not self._parse_date(v):
+                        try:
+                            float(v)
+                        except (ValueError, TypeError):
+                            target_col = get_column_letter(col)
+                            break
+                if target_col:
+                    break
+        if target_col is None:
+            return 0, 0
+
+        col_index = self.get_column_number(target_col)
+        converted = 0
+        checked = 0
+        for row in range(sheet.min_row + 1, sheet.max_row + 1):
+            cell = sheet.cell(row=row, column=col_index)
+            value = cell.value
+            if not isinstance(value, str):
+                continue
+            checked += 1
+            title = " ".join(w.capitalize() if w else w for w in value.split())
+            if title != value:
+                cell.value = title
+                converted += 1
+        return converted, checked
+
+    def detect_invalid_values(self, selected_column=None, sheet_name=None):
+        """Detect invalid values in the used range: non-numeric cells inside
+        otherwise-numeric columns, plus empty gaps in the middle of columns.
+        Returns a list of (cell_ref, reason) and the raw candidate list.
+        """
+        sheet = self.get_sheet(sheet_name)
+        issues = []
+
+        for col in range(sheet.min_column, sheet.max_column + 1):
+            col_letter = get_column_letter(col)
+            values = []
+            rows_with_value = []
+            for row in range(sheet.min_row, sheet.max_row + 1):
+                cell = sheet.cell(row=row, column=col)
+                if cell.value is None:
+                    continue
+                if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                    values.append(cell.value)
+                    rows_with_value.append(row)
+                elif self._is_numeric_str(cell.value):
+                    values.append(float(cell.value))
+                    rows_with_value.append(row)
+            if not values:
+                continue
+
+            # Numeric column: any non-empty cell that is not numeric is invalid.
+            for row in range(sheet.min_row + 1, sheet.max_row + 1):
+                cell = sheet.cell(row=row, column=col)
+                if cell.value is None:
+                    continue
+                if not self._is_numeric_str(cell.value):
+                    if isinstance(cell.value, str):
+                        issues.append((f"{col_letter}{row}", "text in numeric column"))
+                    elif isinstance(cell.value, bool):
+                        issues.append((f"{col_letter}{row}", "TRUE/FALSE in numeric column"))
+
+            # Empty gap in the middle of the column.
+            if rows_with_value:
+                top, bottom = min(rows_with_value), max(rows_with_value)
+                for row in range(top, bottom + 1):
+                    cell = sheet.cell(row=row, column=col)
+                    if cell.value is None:
+                        issues.append((f"{col_letter}{row}", "empty cell in data range"))
+
+        return issues, issues
+
+    @staticmethod
+    def _is_numeric_str(value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+        if not isinstance(value, str):
+            return False
+        try:
+            float(value.strip())
+            return True
+        except ValueError:
+            return False
 
     def create_chart(self, column, sheet_name=None, chart_type="column"):
         """Create a chart for a numeric column and add it to the sheet.
@@ -433,9 +604,33 @@ class ExcelHandler:
                 })
 
             trends = self._detect_trends(sheet)
-            report[name] = {"metrics": insights, "trends": trends}
+            anomalies = self._detect_anomalies(sheet)
+            report[name] = {"metrics": insights, "trends": trends,
+                            "anomalies": anomalies}
 
         return report
+
+    def _detect_anomalies(self, sheet):
+        """Flag values more than 2 standard deviations from the column mean."""
+        from backend.calculator.engine import CalculationEngine
+
+        anomalies = []
+        for col in range(sheet.min_column, sheet.max_column + 1):
+            values, max_row, min_row = self.get_column_values(
+                get_column_letter(col), sheet.title
+            )
+            if len(values) < 3:
+                continue
+            header = sheet.cell(row=sheet.min_row, column=col).value
+            label = header or get_column_letter(col)
+            mean = sum(values) / len(values)
+            stdev = CalculationEngine.standard_deviation(values)
+            if stdev == 0:
+                continue
+            for i, v in enumerate(values):
+                if abs(v - mean) > 2 * stdev:
+                    anomalies.append((label, v, mean, stdev, i))
+        return anomalies
 
     def _detect_trends(self, sheet):
         """Detect simple trends across numeric columns vs. a label column."""
