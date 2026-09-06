@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excel AI Copilot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1>Excel AI Copilot</h1>
+      <p class="tagline">Natural language spreadsheet automation</p>
+
+      <label class="upload">
+        <input type="file" id="fileInput" accept=".xlsx,.xlsm,.xls" />
+        Upload workbook
+      </label>
+      <div class="file-status" id="fileStatus">No workbook loaded</div>
+
+      <div class="sheets" id="sheets"></div>
+
+      <h2>History</h2>
+      <ul class="history" id="history"></ul>
+
+      <div class="examples">
+        <h2>Try:</h2>
+        <ul>
+          <li>Column D ka sum karo</li>
+          <li>Revenue ka total karo</li>
+          <li>Revenue ka average nikal do</li>
+          <li>Revenue minus expense karke profit nikalo</li>
+          <li>Column B sort karo</li>
+          <li>Duplicate rows hata do</li>
+          <li>Filter data jahan Revenue 100 se zyada</li>
+          <li>Sales ka chart bana do</li>
+          <li>Is workbook ka analysis kar do</li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="preview" id="preview">
+        <h2>Data preview</h2>
+        <div class="table-wrap" id="tableWrap"><p class="hint">Upload an Excel file to see a preview.</p></div>
+      </div>
+      <div class="chat-wrap">
+        <div class="messages" id="messages">
+          <div class="msg bot">Hello! Upload a workbook and ask me to calculate things. Examples are on the left.</div>
+        </div>
+        <form class="input-row" id="commandForm">
+          <input id="commandInput" placeholder='Try: "Column D ka total karo aur D21 mein daal do"' autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

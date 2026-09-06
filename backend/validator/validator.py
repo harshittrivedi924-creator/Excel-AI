@@ -27,6 +27,12 @@ class Validator:
         "PERCENTAGE",
         "DIFFERENCE",
         "GROWTH",
+        "SORT",
+        "DEDUPE",
+        "FILTER",
+        "FIND_EMPTY",
+        "CHART",
+        "ANALYZE",
     }
 
     def __init__(self, excel_handler):

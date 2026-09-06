@@ -1,5 +1,6 @@
 import openpyxl
 from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.chart import BarChart, LineChart, Reference
 
 
 class ExcelHandler:
@@ -195,3 +196,292 @@ class ExcelHandler:
                 if header_str == search or header_str.startswith(search):
                     return get_column_letter(col_index)
         return None
+
+    # ------------------------------------------------------------------ #
+    # Data operations
+    # ------------------------------------------------------------------ #
+
+    def _read_rows(self, sheet):
+        """Read all used rows as lists of values."""
+        rows = []
+        for row in sheet.iter_rows(
+            min_row=sheet.min_row, max_row=sheet.max_row,
+            min_col=sheet.min_column, max_col=sheet.max_column,
+        ):
+            rows.append([cell.value for cell in row])
+        return rows
+
+    def _write_rows(self, sheet, rows):
+        """Overwrite the used range with the given rows (clears leftovers)."""
+        for row in sheet.iter_rows(
+            min_row=sheet.min_row, max_row=sheet.max_row,
+            min_col=sheet.min_column, max_col=sheet.max_column,
+        ):
+            for cell in row:
+                cell.value = None
+
+        for r_idx, row in enumerate(rows, start=1):
+            for c_idx, value in enumerate(row, start=1):
+                sheet.cell(row=r_idx, column=c_idx).value = value
+
+    def sort_sheet(self, column, ascending=True, sheet_name=None):
+        """Sort the sheet by a column, keeping the header row on top.
+        Returns the number of data rows sorted.
+        """
+        sheet = self.get_sheet(sheet_name)
+        if isinstance(column, str):
+            col_index = self.get_column_number(column)
+        else:
+            col_index = column
+
+        rows = self._read_rows(sheet)
+        if not rows:
+            return 0
+        header = rows[0]
+        data = rows[1:]
+
+        def key(row):
+            value = row[col_index - 1] if col_index <= len(row) else None
+            try:
+                return (float(value),)
+            except (TypeError, ValueError):
+                return (float("inf"), str(value or ""))
+
+        data.sort(key=key, reverse=not ascending)
+
+        self._write_rows(sheet, [header] + data)
+        return len(data)
+
+    def remove_duplicates(self, sheet_name=None):
+        """Remove fully-duplicate rows, keeping the first occurrence.
+        Returns the number of removed rows.
+        """
+        sheet = self.get_sheet(sheet_name)
+        rows = self._read_rows(sheet)
+        if not rows:
+            return 0
+        header = rows[0]
+        data = rows[1:]
+
+        seen = set()
+        unique = []
+        for row in data:
+            signature = tuple(repr(v) for v in row)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            unique.append(row)
+
+        self._write_rows(sheet, [header] + unique)
+        return len(data) - len(unique)
+
+    def filter_rows(self, column, operator, value, sheet_name=None):
+        """Filter rows by a condition on a column.
+        Writes matching rows to a new 'Filtered' sheet.
+        Returns (matched_count, total_rows).
+        """
+        sheet = self.get_sheet(sheet_name)
+        if isinstance(column, str):
+            col_index = self.get_column_number(column)
+        else:
+            col_index = column
+
+        rows = self._read_rows(sheet)
+        if not rows:
+            return 0, 0
+        header = rows[0]
+        data = rows[1:]
+
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except ValueError:
+                value = value.lower()
+
+        matches = []
+        for row in data:
+            cell_value = row[col_index - 1] if col_index <= len(row) else None
+
+            def coerce(v):
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except ValueError:
+                        return v.lower()
+                return v
+
+            cv = coerce(cell_value)
+            numeric = isinstance(cv, (int, float))
+            if operator == ">":
+                ok = numeric and cv > value
+            elif operator == "<":
+                ok = numeric and cv < value
+            elif operator == ">=":
+                ok = numeric and cv >= value
+            elif operator == "<=":
+                ok = numeric and cv <= value
+            elif operator == "==":
+                ok = str(cv).lower() == str(value).lower()
+            else:
+                ok = False
+            if ok:
+                matches.append(row)
+
+        # Write to a new sheet
+        if "Filtered" in self.workbook.sheetnames:
+            del self.workbook["Filtered"]
+        filtered = self.workbook.create_sheet("Filtered")
+        self._write_rows(filtered, [header] + matches)
+        return len(matches), len(data)
+
+    def find_empty_cells(self, column=None, sheet_name=None):
+        """Find empty cells in the used range (optionally a single column).
+        Returns a list of cell references like ['B3', 'D5'].
+        """
+        sheet = self.get_sheet(sheet_name)
+        empty = []
+        max_col = sheet.max_column if column is None else (self.get_column_number(column))
+        if column is None:
+            min_col = sheet.min_column
+        else:
+            min_col = max_col
+
+        for row in range(sheet.min_row, sheet.max_row + 1):
+            for col in range(min_col, max_col + 1):
+                if sheet.cell(row=row, column=col).value is None:
+                    empty.append(f"{get_column_letter(col)}{row}")
+        return empty
+
+    def create_chart(self, column, sheet_name=None, chart_type="column"):
+        """Create a chart for a numeric column and add it to the sheet.
+        Returns a dict describing the chart.
+        """
+        sheet = self.get_sheet(sheet_name)
+        if isinstance(column, str):
+            col_index = self.get_column_number(column)
+        else:
+            col_index = column
+        col_letter = get_column_letter(col_index)
+
+        max_row = sheet.max_row
+        if max_row < 2:
+            raise ValueError("Not enough data to chart.")
+
+        title = str(sheet.cell(row=1, column=col_index).value or f"Column {col_letter}")
+        data_ref = Reference(
+            sheet, min_col=col_index, min_row=1, max_row=max_row
+        )
+
+        # Use the first column as categories if it has data
+        cats = None
+        first_col_has = any(
+            sheet.cell(row=r, column=1).value is not None
+            for r in range(1, max_row + 1)
+        )
+        if first_col_has and col_index != 1:
+            cats = Reference(sheet, min_col=1, min_row=2, max_row=max_row)
+
+        chart = BarChart() if chart_type == "column" else LineChart()
+        chart.add_data(data_ref, titles_from_data=True)
+        if cats is not None:
+            chart.set_categories(cats)
+        chart.title = title
+        chart.y_axis.title = title
+
+        sheet.add_chart(chart, f"{col_letter}{max_row + 2}")
+        return {"title": title, "source": f"{col_letter}", "rows": max_row - 1}
+
+    # ------------------------------------------------------------------ #
+    # Analysis
+    # ------------------------------------------------------------------ #
+
+    def analyze_workbook(self, sheet_name=None):
+        """Produce a text analysis report of the workbook.
+        Returns a dict of insights per sheet.
+        """
+        report = {}
+
+        if sheet_name is not None:
+            sheets = [sheet_name]
+        else:
+            sheets = self.workbook.sheetnames
+
+        for name in sheets:
+            sheet = self.workbook[name]
+            insights = []
+            max_col = sheet.max_column
+
+            for col in range(1, max_col + 1):
+                header = sheet.cell(row=sheet.min_row, column=col).value
+                values, max_row, min_row = self.get_column_values(
+                    get_column_letter(col), name
+                )
+                if not values:
+                    continue
+                label = header or get_column_letter(col)
+                total = sum(values)
+                avg = sum(values) / len(values)
+                high = max(values)
+                low = min(values)
+                insights.append({
+                    "column": label,
+                    "total": round(total, 2),
+                    "average": round(avg, 2),
+                    "max": high,
+                    "min": low,
+                    "count": len(values),
+                })
+
+            trends = self._detect_trends(sheet)
+            report[name] = {"metrics": insights, "trends": trends}
+
+        return report
+
+    def _detect_trends(self, sheet):
+        """Detect simple trends across numeric columns vs. a label column."""
+        trends = []
+        label_col = None
+        for col in range(sheet.min_column, sheet.max_column + 1):
+            header = sheet.cell(row=sheet.min_row, column=col).value
+            if header and str(header).lower() in (
+                "month", "date", "name", "product", "year", "category",
+            ):
+                label_col = col
+                break
+
+        for col in range(sheet.min_column, sheet.max_column + 1):
+            values, max_row, min_row = self.get_column_values(
+                get_column_letter(col), sheet.title
+            )
+            if len(values) < 2:
+                continue
+            header = sheet.cell(row=sheet.min_row, column=col).value or "data"
+            # Detect the biggest change between consecutive rows
+            best_growth = None
+            best_drop = None
+            for i in range(1, len(values)):
+                prev, curr = values[i - 1], values[i]
+                if prev == 0:
+                    continue
+                pct = (curr - prev) / prev * 100
+                if best_growth is None or pct > best_growth[2]:
+                    best_growth = (i, curr, pct)
+                if best_drop is None or pct < best_drop[2]:
+                    best_drop = (i, curr, pct)
+            if best_growth:
+                label = ""
+                if label_col:
+                    label = str(sheet.cell(row=min_row + best_growth[0], column=label_col).value or "")
+                    label = f" ({label})"
+                trends.append(
+                    f"{header} rose {best_growth[2]:.1f}% to {best_growth[1]}{label}"
+                )
+            if best_drop and best_drop[2] < 0:
+                label = ""
+                if label_col:
+                    label = str(sheet.cell(row=min_row + best_drop[0], column=label_col).value or "")
+                    label = f" ({label})"
+                trends.append(
+                    f"{header} fell {abs(best_drop[2]):.1f}% to {best_drop[1]}{label}"
+                )
+        return trends

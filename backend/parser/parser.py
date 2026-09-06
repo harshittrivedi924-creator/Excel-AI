@@ -49,6 +49,26 @@ class CommandParser:
         "badhi": "GROWTH",
         "kitni badhi": "GROWTH",
         "kitni badh gayi": "GROWTH",
+        "sort": "SORT",
+        "sort karo": "SORT",
+        "arrange": "SORT",
+        "duplicates": "DEDUPE",
+        "duplicate": "DEDUPE",
+        "dedupe": "DEDUPE",
+        "remove duplicates": "DEDUPE",
+        "duplicate rows hata": "DEDUPE",
+        "filter": "FILTER",
+        "filter karo": "FILTER",
+        "empty cells": "FIND_EMPTY",
+        "khali cells": "FIND_EMPTY",
+        "find empty": "FIND_EMPTY",
+        "chart": "CHART",
+        "chart bana": "CHART",
+        "graph": "CHART",
+        "analysis": "ANALYZE",
+        "analyze": "ANALYZE",
+        "analyse": "ANALYZE",
+        "report bana": "ANALYZE",
         "calculate": None,
     }
 
@@ -111,6 +131,12 @@ class CommandParser:
                     "named_source": named[0],
                     "destination": destination,
                 }
+
+        # Data operations
+        if operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY",
+                         "CHART", "ANALYZE"):
+            return self._parse_data_operation(command, operation, cells,
+                                              named, column_matches, numbers)
 
         # Binary operations
         if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
@@ -312,6 +338,108 @@ class CommandParser:
         for pattern in patterns:
             for match in re.finditer(pattern, command):
                 return match.group(1).upper()
+        return None
+
+    def _parse_data_operation(self, command, operation, cells, named,
+                              column_matches, numbers):
+        """Parse data operations (sort/dedupe/filter/find-empty/chart/analyze)."""
+        destination = self._find_destination(command)
+        dest_col = self._find_column_destination(command)
+
+        # Determine the target column and value
+        column = None
+        if column_matches:
+            column = column_matches[0].upper()
+        elif named:
+            column = named[0]
+        else:
+            bare = re.findall(r"\b([a-hj-z])\b", command)
+            if bare:
+                column = bare[0].upper()
+
+        value = None
+        operator = None
+
+        # Filter conditions
+        if operation == "FILTER":
+            condition = self._parse_filter_condition(command, column)
+            if condition:
+                column, operator, value = condition
+
+        if operation == "ANALYZE":
+            return {"operation": "ANALYZE",
+                    "column": column,
+                    "whole_sheet": column is None}
+
+        if operation in ("SORT", "DEDUPE", "FIND_EMPTY", "FILTER", "CHART"):
+            if operation == "FILTER" and operator is None:
+                raise ParserError(
+                    "I couldn't find a filter condition. Try something like "
+                    "'Filter data jahan Revenue 1000 se zyada'."
+                )
+            if operation in ("SORT", "CHART") and column is None:
+                bare = re.findall(r"\b([a-hj-z])\b", command)
+                if bare:
+                    column = bare[0].upper()
+
+            return {
+                "operation": operation,
+                "column": column,
+                "whole_sheet": column is None,
+                "value": value,
+                "operator": operator,
+                "destination": destination,
+                "line_chart": "line" in command if operation == "CHART" else False,
+            }
+
+        raise ParserError(f"I couldn't understand the {operation} command.")
+
+    def _parse_filter_condition(self, command, column):
+        """Parse a filter condition into (column, operator, value).
+        Examples:
+          - "Revenue 1000 se zyada"      -> (Revenue, >, 1000)
+          - "jahan C2 se zyada"          -> (C, >, 2)
+          - "where B > 500"              -> (B, >, 500)
+          - "<value> se kam"             -> (column, <, value)
+        """
+        # Pattern: <column> <number> se zyada / se kam
+        m = re.search(r"\b([a-z])(\d+)\s+([\d.]+)\s+se\s+(zyada|kam|barabar)\b", command)
+        if m:
+            column = m.group(1).upper()
+            value = float(m.group(3))
+            operator = {"zyada": ">", "kam": "<", "barabar": "=="}[m.group(4)]
+            return column, operator, value
+
+        # Pattern: <column> <number> (with explicit operator symbols)
+        m = re.search(r"\b([a-z])(\d+)\s*(>=|<=|==|=|>|<)\s*([\d.]+)\b", command)
+        if m:
+            column = m.group(1).upper()
+            operator = m.group(2)
+            value = float(m.group(4))
+            return column, operator, value
+
+        # Pattern: <word> <number> se zyada/kam (named column)
+        m = re.search(r"\b(\w+)\s+([\d.]+)\s+se\s+(zyada|kam)\b", command)
+        if m and column:
+            value = float(m.group(2))
+            operator = {"zyada": ">", "kam": "<"}[m.group(3)]
+            return column, operator, value
+
+        # Pattern: <word> se zyada/kam <number>
+        m = re.search(r"\b(\w+)\s+se\s+(zyada|kam)\s+([\d.]+)\b", command)
+        if m and column:
+            value = float(m.group(3))
+            operator = {"zyada": ">", "kam": "<"}[m.group(2)]
+            return column, operator, value
+
+        # Pattern: "jahan Revenue 1000 se zyada"
+        m = re.search(r"jahan\s+(\w+)\s+([\d.]+)\s+se\s+(zyada|kam)\b", command)
+        if m:
+            column = m.group(1).upper()
+            value = float(m.group(2))
+            operator = {"zyada": ">", "kam": "<"}[m.group(3)]
+            return column, operator, value
+
         return None
 
     def _parse_cell_references(self, command, operation, cells):

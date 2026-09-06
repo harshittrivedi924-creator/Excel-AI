@@ -78,6 +78,21 @@ class ExcelCopilot:
                     instruction, sheet_name, allow_overwrite
                 )
 
+            elif operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY"):
+                result, written_count = self._handle_data_operation(
+                    instruction, sheet_name
+                )
+
+            elif operation == "CHART":
+                result, written_count = self._handle_chart(
+                    instruction, sheet_name
+                )
+
+            elif operation == "ANALYZE":
+                result, written_count = self._handle_analyze(
+                    instruction, sheet_name
+                )
+
             # Step 4: Record history
             entry = HistoryEntry(command, instruction, result, destination)
             self.history.append(entry)
@@ -346,6 +361,107 @@ class ExcelCopilot:
     # Helpers
     # ------------------------------------------------------------------ #
 
+    def _handle_data_operation(self, instruction, sheet_name=None):
+        """Handle SORT / DEDUPE / FILTER / FIND_EMPTY. Returns (result, count)."""
+        operation = instruction["operation"]
+        column = instruction.get("column")
+
+        # Resolve named column letters
+        col_letter = None
+        if column:
+            col_letter = self._resolve_named_column(column, sheet_name)
+
+        if operation == "SORT":
+            if col_letter:
+                count = self.excel.sort_sheet(col_letter, sheet_name=sheet_name)
+                return {"column": col_letter, "rows": count}, count
+            # Sort by the first numeric-friendly column
+            sheet = self.excel.get_sheet(sheet_name)
+            target = 1
+            for col in range(1, sheet.max_column + 1):
+                ctx = self.excel.get_column_letter(col)
+                vals, _, _ = self.excel.get_column_values(ctx, sheet_name)
+                if vals:
+                    target = col
+                    break
+            col_letter = self.excel.get_column_letter(target)
+            count = self.excel.sort_sheet(col_letter, sheet_name=sheet_name)
+            return {"column": col_letter, "rows": count}, count
+
+        elif operation == "DEDUPE":
+            count = self.excel.remove_duplicates(sheet_name)
+            return {"removed": count}, count
+
+        elif operation == "FILTER":
+            operator = instruction.get("operator")
+            value = instruction.get("value")
+            if not col_letter or operator is None or value is None:
+                raise ParserError(
+                    "I need a filter condition like 'Revenue 1000 se zyada'."
+                )
+            matched, total = self.excel.filter_rows(
+                col_letter, operator, value, sheet_name
+            )
+            return {"matched": matched, "total": total,
+                    "column": col_letter, "value": value}, matched
+
+        elif operation == "FIND_EMPTY":
+            empty = self.excel.find_empty_cells(col_letter, sheet_name)
+            return {"empty_count": len(empty), "cells": empty[:50]}, len(empty)
+
+        raise ParserError(f"Unsupported data operation: {operation}")
+
+    def _handle_chart(self, instruction, sheet_name=None):
+        """Handle CHART."""
+        column = instruction.get("column")
+        if not column:
+            raise ParserError(
+                "Please specify a column to chart, like 'Sales ka chart bana do'."
+            )
+        col_letter = self._resolve_named_column(column, sheet_name)
+        chart_type = "line" if instruction.get("line_chart") else "column"
+        try:
+            info = self.excel.create_chart(col_letter, sheet_name, chart_type)
+        except ValueError as e:
+            raise ValidationError(str(e))
+        return {"chart": info["title"], "source": info["source"]}, info["rows"]
+
+    def _handle_analyze(self, instruction, sheet_name=None):
+        """Handle ANALYZE. Returns a structured report + writes a summary sheet."""
+        report = self.excel.analyze_workbook(sheet_name)
+
+        summary = []
+        total_insights = 0
+        for sheet_title, data in report.items():
+            metrics = data["metrics"]
+            trends = data["trends"]
+            summary.append(f"Sheet: {sheet_title}")
+            if not metrics and not trends:
+                summary.append("  No numeric data to analyze.")
+                continue
+            for m in metrics:
+                summary.append(
+                    f"  {m['column']}: total {m['total']}, average "
+                    f"{m['average']}, max {m['max']}, min {m['min']} "
+                    f"({m['count']} values)"
+                )
+                total_insights += 1
+            for t in trends:
+                summary.append(f"  Trend: {t}")
+
+        self._write_analysis_sheet("\n".join(summary), sheet_name)
+        return {"sheets": list(report.keys()), "insights": total_insights,
+                "lines": summary}, total_insights
+
+    def _write_analysis_sheet(self, text, sheet_name=None, max_cols=6):
+        """Write the analysis text into an 'Analysis Report' sheet."""
+        if "Analysis Report" in self.excel.workbook.sheetnames:
+            del self.excel.workbook["Analysis Report"]
+        ws = self.excel.workbook.create_sheet("Analysis Report")
+        lines = text.splitlines()
+        for i, line in enumerate(lines[:max_cols]):
+            ws.cell(row=i + 1, column=1).value = line
+
     def _resolve_named_column(self, name, sheet_name=None, create=False):
         """Resolve a name to a column letter via the header row.
         A single column letter (e.g. 'B') is used directly.
@@ -479,6 +595,52 @@ class ExcelCopilot:
     def _build_confirmation(self, instruction, result, destination, written_count=0):
         """Build a confirmation message for the user."""
         op = instruction.get("operation")
+
+        # Data operation messages
+        if op == "SORT":
+            col = result.get("column") if isinstance(result, dict) else None
+            return (
+                f"Done. I sorted {written_count} rows"
+                + (f" by column {col}." if col else ".")
+            )
+        if op == "DEDUPE":
+            return (
+                f"Done. I removed {written_count} duplicate row(s)."
+                if written_count
+                else "No duplicate rows were found."
+            )
+        if op == "FILTER":
+            r = result if isinstance(result, dict) else {}
+            val = r.get("value", "")
+            col = r.get("column", "")
+            return (
+                f"Done. I kept {r.get('matched', 0)} of "
+                f"{r.get('total', 0)} rows matching the filter on {col}."
+            )
+        if op == "FIND_EMPTY":
+            if not written_count:
+                return "No empty cells were found."
+            r = result if isinstance(result, dict) else {}
+            cells = r.get("cells", [])
+            preview = ", ".join(cells[:10])
+            more = f" and {written_count - 10} more" if len(cells) > 10 else ""
+            return f"Found {written_count} empty cell(s): {preview}{more}."
+        if op == "CHART":
+            r = result if isinstance(result, dict) else {}
+            return (
+                f"Done. I created a chart for '{r.get('chart')}' "
+                f"from {written_count} rows of data."
+            )
+        if op == "ANALYZE":
+            r = result if isinstance(result, dict) else {}
+            if r.get("lines"):
+                top = "\n".join(r["lines"][:5])
+                return (
+                    f"Analysis complete across {len(r.get('sheets', []))} sheet(s).\n"
+                    f"{top}"
+                )
+            return "Analysis complete."
+
         source = instruction.get("column") or instruction.get("source")
         used_range = instruction.get("used_range")
 
