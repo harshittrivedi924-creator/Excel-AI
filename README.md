@@ -7,6 +7,10 @@ Natural Language Spreadsheet Automation Agent
 - Natural language commands for Excel operations
 - Support for calculations (SUM, AVERAGE, MIN, MAX, COUNT)
 - Basic arithmetic operations (+, -, *, /)
+- Advanced calcs: DIFFERENCE, GROWTH (%), PERCENTAGE
+- Named-column lookups ("Revenue ka total karo", "Expense ka average")
+- Element-wise formulas ("Revenue minus expense karke profit nikalo")
+- Overwrite confirmation before replacing existing cells
 - Hinglish support
 - Voice command support (planned)
 

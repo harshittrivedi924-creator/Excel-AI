@@ -25,6 +25,8 @@ class Validator:
         "MULTIPLY",
         "DIVIDE",
         "PERCENTAGE",
+        "DIFFERENCE",
+        "GROWTH",
     }
 
     def __init__(self, excel_handler):
@@ -131,5 +133,13 @@ class Validator:
             value = instruction["value"]
             total = instruction["total"]
             result = CalculationEngine.percentage(value, total)
+        elif operation == "DIFFERENCE":
+            a = instruction["a"]
+            b = instruction["b"]
+            result = CalculationEngine.difference(a, b)
+        elif operation == "GROWTH":
+            new = instruction["new"]
+            old = instruction["old"]
+            result = CalculationEngine.growth(new, old)
 
         return result

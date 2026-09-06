@@ -27,58 +27,61 @@ class CommandParser:
         "count": "COUNT",
         "add": "ADD",
         "plus": "ADD",
-        "add karo": "ADD",
-        "add(ake)": "ADD",
+        "jod": "ADD",
         "subtract": "SUBTRACT",
         "minus": "SUBTRACT",
-        "difference": "SUBTRACT",
-        "subtract karo": "SUBTRACT",
+        "ghatao": "SUBTRACT",
+        "difference": "DIFFERENCE",
+        "antar": "DIFFERENCE",
         "multiply": "MULTIPLY",
         "times": "MULTIPLY",
         "product": "MULTIPLY",
-        "multiply karo": "MULTIPLY",
         "guna": "MULTIPLY",
         "divide": "DIVIDE",
         "div": "DIVIDE",
+        "bhaag": "DIVIDE",
         "percentage": "PERCENTAGE",
         "percent": "PERCENTAGE",
         "persent": "PERCENTAGE",
+        "kitna percent": "PERCENTAGE",
+        "growth": "GROWTH",
+        "increase": "GROWTH",
+        "badhi": "GROWTH",
+        "kitni badhi": "GROWTH",
+        "kitni badh gayi": "GROWTH",
         "calculate": None,
     }
 
-    HINGLISH_KEYWORDS = {
-        "karo": "execute",
-        "nikal": "calculate",
-        "nikal do": "calculate",
-        "batao": "report",
-        "kar do": "execute",
-        "daal do": "write",
-        "mein": "to",
-        "me": "to",
-        "ka": "of",
-        "ka total": "sum",
-        "ka sum": "sum",
+    # Vocabulary of common data column names (English + Hinglish).
+    NAMED_COLUMNS = {
+        "january", "february", "march", "april", "june", "july",
+        "august", "september", "october", "november", "december",
+        "revenue", "expense", "profit", "sales", "cost", "income",
+        "loss", "quantity", "price", "amount", "total",
+        "bikri", "kharcha", "munafa", "aukhat", "sale", "bechne",
     }
+
+    # Words indicating the whole sheet should be used.
+    WHOLE_SHEET_WORDS = {"sabka", "sab", "sabhi", "all", "everything", "poora", "puri"}
 
     def parse(self, command):
         """Parse a natural language command into a structured instruction."""
-        command = command.strip().lower()
-
-        # Remove common punctuation
-        command = re.sub(r"[?!.,]+", "", command)
+        command = self._normalize(command)
 
         # Check for a cell reference in the form like B2
-        cell_pattern = r"\b([a-z])\s*(\d+)\b"
-        cells = re.findall(cell_pattern, command)
+        cells = re.findall(r"\b([a-z])\s*(\d+)\b", command)
+
+        # Check for a literal number like 100 or 2.5
+        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\b", command)
 
         # Check for column reference like "Column D" or just "D"
-        column_pattern = r"\bcolumn\s+([a-z])\b"
-        column_matches = re.findall(column_pattern, command)
+        column_matches = re.findall(r"\bcolumn\s+([a-z])\b", command)
 
-        # Also look for bare column letters (single letters that aren't
-        # part of other words, commonly D, E, A, B, etc.)
+        # Also look for bare column letters
         bare_columns = re.findall(r"\b([a-hj-z])\b", command)
-        # Exclude common words that are single letters
+
+        # Named data labels (revenue, expense, months, etc.)
+        named = self._extract_named_operands(command)
 
         # Determine operation
         operation = self._detect_operation(command)
@@ -86,42 +89,65 @@ class CommandParser:
         if operation is None:
             raise ParserError(
                 "I couldn't understand the command. Please try using words like "
-                "sum, total, average, min, max, count, add, subtract, multiply, divide."
+                "sum, total, average, min, max, count, add, subtract, multiply, "
+                "divide, difference, or percentage."
             )
 
-        # Handle arithmetic like B2 + C2
-        if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"):
-            return self._parse_arithmetic(command, operation, column_matches)
+        # Whole-sheet operations: "Sabka sum kar do"
+        if operation in ("SUM", "AVERAGE", "MIN", "MAX", "COUNT", "PERCENTAGE"):
+            if any(w in command for w in self.WHOLE_SHEET_WORDS) and not cells:
+                destination = self._find_destination(command)
+                return {
+                    "operation": operation,
+                    "whole_sheet": True,
+                    "destination": destination,
+                }
 
-        # Handle column-based calculations
+            # Named single column: "Sales ka total karo" or with a destination cell
+            if named and not column_matches and not bare_columns:
+                destination = self._find_destination(command)
+                return {
+                    "operation": operation,
+                    "named_source": named[0],
+                    "destination": destination,
+                }
+
+        # Binary operations
+        if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
+                         "DIFFERENCE", "GROWTH"):
+            return self._parse_binary(command, operation, cells, numbers, named)
+
+        # Column-based calculations (SUM/AVERAGE/MIN/MAX/COUNT on a column)
         if column_matches:
             column = column_matches[0].upper()
         elif bare_columns:
-            # Heuristic: pick the column that appears in context of operation
             column = bare_columns[0].upper()
         else:
             column = None
 
-        # Handle SUM/AVERAGE etc on a column
         if column:
-            # Check for destination cell
             destination = self._find_destination(command)
-            source = column
             return {
                 "operation": operation,
-                "source": source,
-                "column": source,
+                "source": column,
+                "column": column,
                 "destination": destination,
             }
 
-        # Try cell arithmetic like B2 + C2 with result destination D2
+        # Explicit cell references like "SUM(B2:C4)" style or fallback
         if cells:
             return self._parse_cell_references(command, operation, cells)
 
         raise ParserError(
             "I couldn't figure out which data to use. Please specify a column "
-            "(like Column D) or cells (like B2 and C2)."
+            "(like Column D), a cell range, or a name like 'Revenue'."
         )
+
+    def _normalize(self, command):
+        """Lowercase and strip punctuation/extra whitespace."""
+        command = command.strip().lower()
+        command = re.sub(r"[?!.,]+", "", command)
+        return re.sub(r"\s+", " ", command)
 
     def _detect_operation(self, command):
         """Detect the operation type from a command."""
@@ -133,16 +159,24 @@ class CommandParser:
                 return op
 
         # Check for arithmetic operators
-        if "+" in command or "plus" in command:
+        if "+" in command or "plus" in command or "jod" in command:
             return "ADD"
-        if "-" in command or ("minus" in command):
-            return "SUBTRACT"
-        if "*" in command or "times" in command:
+        if "*" in command or "times" in command or "guna" in command:
             return "MULTIPLY"
         if "/" in command:
             return "DIVIDE"
+        if "-" in command or "minus" in command or "ghatao" in command:
+            return "SUBTRACT"
 
         return None
+
+    def _extract_named_operands(self, command):
+        """Return the ordered list of known data-label words in the command."""
+        found = []
+        for token in command.split():
+            if token in self.NAMED_COLUMNS and token not in found:
+                found.append(token)
+        return found
 
     def _find_destination(self, command):
         """Find the destination cell in the command (e.g., D21).
@@ -162,37 +196,126 @@ class CommandParser:
 
         return None
 
-    def _parse_arithmetic(self, command, operation, column_matches):
-        """Parse arithmetic operations like B2 + C2."""
-        # Find cell references
-        cells = re.findall(r"\b([a-z])(\d+)\b", command)
-        cell_refs = [f"{c[0].upper()}{c[1]}" for c in cells]
+    def _parse_binary(self, command, operation, cells, numbers, named):
+        """Parse binary operations into structured instructions.
 
-        # Also check for columns
-        if column_matches:
-            cell_refs = [c.upper() for c in column_matches]
-            destination = self._find_destination(command)
-        else:
-            # Find destination first (marker-based), then treat the
-            # remaining cell refs as inputs.
-            destination = self._find_destination(command)
-            if destination and destination in cell_refs:
+        Supports:
+          - cell refs:      "B2 + C2", "B2 - C2"
+          - cell + number:  "B2 + 100"
+          - named columns:  "Revenue minus expense karke profit nikalo"
+          - growth:         "February ki sales January se kitni badhi"
+        """
+        destination = self._find_destination(command)
+
+        # Month growth pattern: "February ki sales January se kitni badhi"
+        if operation == "GROWTH":
+            months = re.findall(
+                r"(\b(?:january|february|march|april|june|july|august|"
+                r"september|october|november|december)\b)[^,]*?(\b(?:january|"
+                r"february|march|april|june|july|august|september|october|"
+                r"november|december)\b)",
+                command,
+            )
+            if months:
+                return {
+                    "operation": "GROWTH",
+                    "named_inputs": [months[0][0], months[0][1]],
+                    "output": destination,
+                }
+
+        # Cell-based inputs
+        if cells:
+            cell_refs = [f"{c[0].upper()}{c[1]}" for c in cells]
+            if destination in cell_refs:
                 cell_refs.remove(destination)
 
-        if len(cell_refs) < 2:
-            raise ParserError(
-                "I need two cell references for arithmetic operations, "
-                "like 'B2 + C2'."
-            )
+            inputs = list(cell_refs)
 
-        return {
-            "operation": operation,
-            "inputs": cell_refs[:2],
-            "output": destination,
-        }
+            # Add literal numbers to fill up to two operands
+            for num in numbers:
+                if len(inputs) >= 2:
+                    break
+                try:
+                    val = float(num)
+                except ValueError:
+                    continue
+                if num not in cell_refs:
+                    inputs.append(val)
+
+            if len(inputs) < 2:
+                raise ParserError(
+                    "I need two values for this operation, "
+                    "like 'B2 + C2' or 'B2 + 100'."
+                )
+
+            return {
+                "operation": operation,
+                "inputs": inputs[:2],
+                "output": destination,
+            }
+
+        # Named-column inputs
+        if named:
+            named_inputs = list(named)
+            named_output = None
+
+            # If more than two labels appear, the trailing label is the output.
+            if len(named_inputs) >= 3:
+                named_output = named_inputs[-1]
+                named_inputs = named_inputs[:-1]
+            elif len(named_inputs) == 2 and operation in (
+                "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"
+            ):
+                # Profit-like output: "Revenue minus expense karke profit nikalo"
+                # if 'profit/munafa/loss' is near the end, treat as output.
+                for out in ("profit", "munafa", "loss", "net", "result"):
+                    if out in command:
+                        named_output = out
+                        break
+                if named_output:
+                    named_inputs = [n for n in named_inputs if n != named_output]
+
+            return {
+                "operation": operation,
+                "named_inputs": named_inputs,
+                "named_output": named_output,
+                "output": destination,
+            }
+
+        # Column-letter operands: "B aur C ko multiply karke D mein daal do"
+        bare_cols = re.findall(r"\b([a-hj-z])\b", command)
+        if bare_cols:
+            dest_col = self._find_column_destination(command)
+            upper_cols = [c.upper() for c in bare_cols]
+            if dest_col and dest_col.upper() in upper_cols:
+                upper_cols.remove(dest_col.upper())
+
+            if len(upper_cols) >= 2:
+                return {
+                    "operation": operation,
+                    "named_inputs": upper_cols[:2],
+                    "named_output": dest_col.upper() if dest_col else None,
+                    "output": destination,
+                }
+
+        raise ParserError(
+            "I need two values for this operation, like 'B2 + C2' "
+            "or 'Revenue minus Expense'."
+        )
+
+    def _find_column_destination(self, command):
+        """Find a destination column letter, e.g. 'D' in 'D mein daal do'."""
+        patterns = [
+            r"([a-hj-z])\s*(?:mein|me|daal do)\b",
+            r"(?:mein|me|daal do)\s+([a-hj-z])\b",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, command):
+                return match.group(1).upper()
+        return None
 
     def _parse_cell_references(self, command, operation, cells):
-        """Parse commands with explicit cell references."""
+        """Parse commands with explicit cell references for aggregate ops."""
         cell_refs = [f"{c[0].upper()}{c[1]}" for c in cells]
         destination = self._find_destination(command)
         if destination and destination in cell_refs:

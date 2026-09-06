@@ -176,3 +176,22 @@ class ExcelHandler:
     def get_column_number(self, letter):
         """Get column number from letter."""
         return column_index_from_string(letter)
+
+    def get_column_by_name(self, name, sheet_name=None):
+        """Find a column letter by matching its header text.
+        Matches case-insensitively and ignores trailing spaces/percent.
+        Returns the column letter (e.g. 'D') or None if not found.
+        """
+        sheet = self.get_sheet(sheet_name)
+        search = name.strip().lower()
+
+        for row in range(sheet.min_row, min(sheet.max_row, 3) + 1):
+            for col_index in range(sheet.min_column, sheet.max_column + 1):
+                header = sheet.cell(row=row, column=col_index).value
+                if header is None:
+                    continue
+                header_str = str(header).strip().lower()
+                header_str = header_str.replace("%", "").strip()
+                if header_str == search or header_str.startswith(search):
+                    return get_column_letter(col_index)
+        return None

@@ -95,3 +95,62 @@ class TestDetection:
 
     def test_detect_count_keyword(self):
         assert self.parser._detect_operation("count karo") == "COUNT"
+
+
+class TestAdvancedCommands:
+    def setup_method(self):
+        self.parser = CommandParser()
+
+    def test_named_column_total(self):
+        result = self.parser.parse("Sales ka total karo")
+        assert result["operation"] == "SUM"
+        assert result["named_source"] == "sales"
+
+    def test_named_column_average(self):
+        result = self.parser.parse("Expense ka average nikal do")
+        assert result["operation"] == "AVERAGE"
+        assert result["named_source"] == "expense"
+
+    def test_profit_calculation(self):
+        result = self.parser.parse("Revenue minus expense karke profit nikalo")
+        assert result["operation"] == "SUBTRACT"
+        assert result["named_inputs"] == ["revenue", "expense"]
+        assert result["named_output"] == "profit"
+
+    def test_growth_months(self):
+        result = self.parser.parse("February ki sales January se kitni badhi")
+        assert result["operation"] == "GROWTH"
+        assert result["named_inputs"] == ["february", "january"]
+
+    def test_difference_cells(self):
+        result = self.parser.parse("B2 aur C2 ka difference batao")
+        assert result["operation"] == "DIFFERENCE"
+        assert "B2" in result["inputs"]
+        assert "C2" in result["inputs"]
+
+    def test_whole_sheet_sum(self):
+        result = self.parser.parse("Sabka sum kar do")
+        assert result["operation"] == "SUM"
+        assert result.get("whole_sheet") is True
+
+    def test_cell_plus_number(self):
+        result = self.parser.parse("B2 + 100")
+        assert result["operation"] == "ADD"
+        assert "B2" in result["inputs"]
+        assert 100 in result["inputs"]
+
+    def test_english_flowing_command(self):
+        result = self.parser.parse("Please calculate the total of column D")
+        assert result["operation"] == "SUM"
+        assert result["column"] == "D"
+
+    def test_hinglish_flowing_command(self):
+        result = self.parser.parse("D ka total batao")
+        assert result["operation"] == "SUM"
+        assert result["column"] == "D"
+
+    def test_multiply_columns_with_output(self):
+        result = self.parser.parse("B aur C ko multiply karke D mein daal do")
+        assert result["operation"] == "MULTIPLY"
+        assert result["named_inputs"] == ["B", "C"]
+        assert result["named_output"] == "D"

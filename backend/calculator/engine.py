@@ -60,3 +60,15 @@ class CalculationEngine:
         if total == 0:
             raise ValueError("Total cannot be zero")
         return (value / total) * 100
+
+    @staticmethod
+    def difference(a, b):
+        """Absolute difference between two numbers."""
+        return abs(a - b)
+
+    @staticmethod
+    def growth(new, old):
+        """Percentage growth of new relative to old."""
+        if old == 0:
+            raise ValueError("Old value cannot be zero for growth")
+        return ((new - old) / old) * 100

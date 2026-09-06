@@ -89,3 +89,23 @@ class TestPercentage:
     def test_percentage_zero_total(self):
         with pytest.raises(ValueError):
             CalculationEngine.percentage(20, 0)
+
+
+class TestDifference:
+    def test_difference(self):
+        assert CalculationEngine.difference(10, 4) == 6
+
+    def test_difference_absolute(self):
+        assert CalculationEngine.difference(4, 10) == 6
+
+
+class TestGrowth:
+    def test_growth_positive(self):
+        assert CalculationEngine.growth(120, 100) == 20.0
+
+    def test_growth_negative(self):
+        assert CalculationEngine.growth(80, 100) == -20.0
+
+    def test_growth_zero_old(self):
+        with pytest.raises(ValueError):
+            CalculationEngine.growth(100, 0)
