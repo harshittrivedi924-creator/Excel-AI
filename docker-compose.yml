@@ -1,0 +1,10 @@
+services:
+  excel-ai:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/backend/api/uploads
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped

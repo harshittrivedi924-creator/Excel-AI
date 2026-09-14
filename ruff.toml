@@ -1,0 +1,24 @@
+line-length = 100
+target-version = "py310"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+]
+ignore = [
+    "E501",  # line length enforced by ruff format instead
+    "BLE001", # generic exceptions at app/CLI/voice entry points are intentional
+    "S110",   # best-effort save; failure is not fatal
+    "S112",   # bare except
+]
+
+[lint.per-file-ignores]
+# Tests intentionally use exact exception types and blind assertions
+"tests/**" = ["B017"]
+
+[lint.isort]
+known-first-party = ["backend"]

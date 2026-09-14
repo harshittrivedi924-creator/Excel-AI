@@ -1,5 +1,5 @@
-import pytest
 import openpyxl
+import pytest
 
 from backend.copilot import ExcelCopilot
 
@@ -82,15 +82,14 @@ class TestEndToEnd:
 class TestWriteToExcel:
     def test_write_sum_to_destination(self, sample_workbook):
         copilot = ExcelCopilot(sample_workbook)
-        result = copilot.process_command(
-            "Column D ka total karo aur D21 mein daal do"
-        )
+        result = copilot.process_command("Column D ka total karo aur D21 mein daal do")
         assert result["success"] is True
         assert result["destination"] == "D21"
 
         # Verify the formula was written
         copilot.excel.save()
         from backend.excel.handler import ExcelHandler
+
         handler = ExcelHandler(sample_workbook)
         formula = handler.get_formula("D21")
         assert formula is not None
@@ -99,9 +98,7 @@ class TestWriteToExcel:
     def test_detect_destination_overwrite(self, sample_workbook):
         """If the destination cell has data and overwrite not allowed, error."""
         copilot = ExcelCopilot(sample_workbook)
-        result = copilot.process_command(
-            "Column D ka total karo aur A2 mein daal do"
-        )
+        result = copilot.process_command("Column D ka total karo aur A2 mein daal do")
         # A2 contains 'Rahul', so this should fail without overwrite permission
         assert result["success"] is False
         assert "contains data" in result["message"]
@@ -133,6 +130,22 @@ class TestErrors:
         result = copilot.process_command("vlookup of column D")
         assert result["success"] is False
 
+    def test_unresolved_destination_rejected(self, sample_workbook):
+        """A write-intent marker with no valid destination must not be
+        silently ignored (the result was previously reported without writing)."""
+        copilot = ExcelCopilot(sample_workbook)
+        result = copilot.process_command("Column D ka total karo aur ABC mein daalo")
+        assert result["success"] is False
+        assert "destination" in result["message"]
+
+    def test_multiletter_column_named_in_error(self, sample_workbook):
+        """'Column XYZ ...' should fail naming the column, not a keyword like
+        'total'."""
+        copilot = ExcelCopilot(sample_workbook)
+        result = copilot.process_command("Column XYZ ka total karo")
+        assert result["success"] is False
+        assert "Column XYZ" in result["message"]
+
     def test_divide_by_zero(self, sample_workbook):
         copilot = ExcelCopilot(sample_workbook)
         # Make B cell zero
@@ -153,3 +166,46 @@ class TestHistory:
         copilot.process_command("Column D ka total karo")
         copilot.process_command("average of column B")
         assert len(copilot.history) == 2
+
+
+class TestInteractiveOverwrite:
+    """Issue #1: overwrite confirmation in CLI interactive mode."""
+
+    def test_accept_overwrite_prompt(self, sample_workbook, monkeypatch):
+        copilot = ExcelCopilot(sample_workbook)
+        monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+        result = copilot.process_interactive("Column D ka total karo aur A2 mein daal do")
+        assert result["success"] is True
+        assert result["destination"] == "A2"
+
+        copilot.excel.save()
+        from backend.excel.handler import ExcelHandler
+
+        handler = ExcelHandler(sample_workbook)
+        assert handler.get_formula("A2") == "SUM(D2:D6)"
+
+    def test_decline_overwrite_prompt(self, sample_workbook, monkeypatch):
+        copilot = ExcelCopilot(sample_workbook)
+        monkeypatch.setattr("builtins.input", lambda prompt: "no")
+        result = copilot.process_interactive("Column D ka total karo aur A2 mein daal do")
+        assert result["success"] is False
+        assert "already contains data" in result["message"]
+        assert copilot.excel.get_cell_value("A2") == "Rahul"
+
+    def test_no_prompt_when_overwrite_not_needed(self, sample_workbook, monkeypatch):
+        copilot = ExcelCopilot(sample_workbook)
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda prompt: (_ for _ in ()).throw(
+                AssertionError("input() should not have been called")
+            ),
+        )
+        result = copilot.process_interactive("Column D ka total karo")
+        assert result["success"] is True
+        assert result["result"] == 15000
+
+    def test_interrupt_at_prompt_returns_none(self, sample_workbook, monkeypatch):
+        copilot = ExcelCopilot(sample_workbook)
+        monkeypatch.setattr("builtins.input", lambda prompt: (_ for _ in ()).throw(EOFError))
+        result = copilot.process_interactive("Column D ka total karo aur A2 mein daal do")
+        assert result is None

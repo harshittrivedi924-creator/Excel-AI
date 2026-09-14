@@ -5,18 +5,32 @@ from flask import Flask, jsonify, request, send_from_directory
 from backend.copilot import ExcelCopilot
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "..", "frontend")
+FRONTEND_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "frontend"
+)
 
 
 def create_app(initial_filepath=None):
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
     copilot = ExcelCopilot()
     active_file = {"path": None}
 
     if initial_filepath and os.path.exists(initial_filepath):
         copilot.load_workbook(initial_filepath)
         active_file["path"] = os.path.abspath(initial_filepath)
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok"})
+
+    @app.errorhandler(413)
+    def too_large(e):
+        return jsonify({"error": "File too large. Maximum upload size is 16MB."}), 413
+
+    @app.errorhandler(500)
+    def server_error(e):
+        return jsonify({"error": "An internal server error occurred."}), 500
 
     @app.route("/")
     def index():
@@ -28,7 +42,6 @@ def create_app(initial_filepath=None):
             return jsonify({"loaded": False, "sheets": [], "rows": [], "file": None})
 
         try:
-            from openpyxl.utils import get_column_letter
             data = []
             sheet = copilot.excel.get_sheet()
             for row in sheet.iter_rows(
@@ -38,13 +51,15 @@ def create_app(initial_filepath=None):
                 values_only=True,
             ):
                 data.append(["" if v is None else str(v) for v in row])
-            return jsonify({
-                "loaded": True,
-                "sheets": copilot.excel.get_sheet_names(),
-                "active_sheet": copilot.excel.get_sheet().title,
-                "rows": data,
-                "file": os.path.basename(active_file["path"]) if active_file["path"] else None,
-            })
+            return jsonify(
+                {
+                    "loaded": True,
+                    "sheets": copilot.excel.get_sheet_names(),
+                    "active_sheet": copilot.excel.get_sheet().title,
+                    "rows": data,
+                    "file": os.path.basename(active_file["path"]) if active_file["path"] else None,
+                }
+            )
         except Exception as e:
             return jsonify({"loaded": False, "error": str(e), "sheets": [], "rows": []})
 
@@ -53,6 +68,9 @@ def create_app(initial_filepath=None):
         file = request.files.get("file")
         if not file:
             return jsonify({"error": "No file uploaded"}), 400
+
+        if not file.filename.endswith((".xlsx", ".xlsm", ".xls")):
+            return jsonify({"error": "Invalid file type. Please upload .xlsx, .xlsm, or .xls"}), 400
 
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         path = os.path.join(UPLOAD_DIR, file.filename)
@@ -72,13 +90,14 @@ def create_app(initial_filepath=None):
         allow_overwrite = bool(payload.get("allow_overwrite", False))
 
         if not copilot.excel.workbook:
-            return jsonify({
-                "success": False,
-                "message": "No workbook loaded. Upload an Excel file first.",
-            }), 400
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "No workbook loaded. Upload an Excel file first.",
+                }
+            ), 400
 
-        result = copilot.process_command(cmd, sheet_name=sheet,
-                                         allow_overwrite=allow_overwrite)
+        result = copilot.process_command(cmd, sheet_name=sheet, allow_overwrite=allow_overwrite)
 
         if result["success"] and active_file["path"]:
             try:
@@ -86,24 +105,29 @@ def create_app(initial_filepath=None):
             except Exception:
                 pass
 
-        return jsonify({
-            "success": result["success"],
-            "message": result["message"],
-            "result": result.get("result"),
-            "overwrite_needed": (
-                not result["success"]
-                and result.get("message", "")
-                and "contains data" in result["message"]
-            ),
-        })
+        return jsonify(
+            {
+                "success": result["success"],
+                "message": result["message"],
+                "result": result.get("result"),
+                "overwrite_needed": (
+                    not result["success"]
+                    and result.get("message", "")
+                    and "contains data" in result["message"]
+                ),
+            }
+        )
 
     @app.route("/api/history")
     def history():
-        items = [{
-            "operation": e.instruction.get("operation"),
-            "result": e.result,
-            "destination": e.destination,
-        } for e in copilot.history]
+        items = [
+            {
+                "operation": e.instruction.get("operation"),
+                "result": e.result,
+                "destination": e.destination,
+            }
+            for e in copilot.history
+        ]
         return jsonify(items)
 
     return app

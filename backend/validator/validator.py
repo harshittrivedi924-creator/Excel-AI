@@ -1,4 +1,4 @@
-from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils import column_index_from_string
 
 from backend.calculator.engine import CalculationEngine
 
@@ -60,10 +60,7 @@ class Validator:
             raise ValidationError("No valid range was found.")
 
         values = self.excel.get_range_values(range_ref, sheet_name)
-        numeric_values = [
-            v for v in values
-            if isinstance(v, (int, float))
-        ]
+        numeric_values = [v for v in values if isinstance(v, (int, float))]
 
         if not numeric_values:
             raise ValidationError(
@@ -76,9 +73,9 @@ class Validator:
         """Validate a column letter and return used range."""
         if isinstance(column, str):
             try:
-                col_index = column_index_from_string(column.upper())
+                column_index_from_string(column.upper())
             except Exception:
-                raise ValidationError(f"I couldn't find Column {column} in this sheet.")
+                raise ValidationError(f"I couldn't find Column {column} in this sheet.") from None
 
         used_range = self.excel.get_used_range(column, sheet_name)
 
@@ -94,9 +91,7 @@ class Validator:
 
         # Check if overwrite is needed
         if not allow_overwrite and self.excel.cell_has_data(cell_ref, sheet_name):
-            raise ValidationError(
-                f"{cell_ref} already contains data. Replace it?"
-            )
+            raise ValidationError(f"{cell_ref} already contains data. Replace it?")
 
         return True
 

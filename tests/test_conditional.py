@@ -1,6 +1,7 @@
+from datetime import datetime
+
 import openpyxl
 import pytest
-from datetime import datetime
 
 from backend.copilot import ExcelCopilot
 
@@ -68,9 +69,7 @@ class TestConditional:
 
     def test_sumif_no_match(self, conditional_workbook):
         copilot = ExcelCopilot(conditional_workbook)
-        result = copilot.process_command(
-            "Column B ka sum karo jahan Product Marker hai"
-        )
+        result = copilot.process_command("Column B ka sum karo jahan Product Marker hai")
         assert result["success"] is True
         assert result["result"] == 0
 

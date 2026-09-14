@@ -154,3 +154,38 @@ class TestAdvancedCommands:
         assert result["operation"] == "MULTIPLY"
         assert result["named_inputs"] == ["B", "C"]
         assert result["named_output"] == "D"
+
+
+class TestWorkbookHeaderParsing:
+    """Issue #2: data operations resolve arbitrary workbook headers."""
+
+    def test_chart_uses_workbook_header(self):
+        parser = CommandParser(headers=["employee", "salary"])
+        result = parser.parse("Salary ka chart bana do")
+        assert result["operation"] == "CHART"
+        assert result["column"] == "salary"
+
+    def test_sort_uses_workbook_header(self):
+        parser = CommandParser(headers=["employee", "salary"])
+        result = parser.parse("Salary sort karo")
+        assert result["operation"] == "SORT"
+        assert result["column"] == "salary"
+
+    def test_filter_uses_workbook_header(self):
+        parser = CommandParser(headers=["employee", "salary"])
+        result = parser.parse("Filter data jahan Salary 60000 se zyada")
+        assert result["operation"] == "FILTER"
+        assert result["column"].lower() == "salary"
+
+    def test_set_headers_updates_parsing(self):
+        parser = CommandParser()
+        parser.set_headers(["bonus"])
+        result = parser.parse("Bonus ka chart bana do")
+        assert result["operation"] == "CHART"
+        assert result["column"] == "bonus"
+
+    def test_single_letter_headers_do_not_shadow_columns(self):
+        parser = CommandParser(headers=["b"])
+        result = parser.parse("Column C sort karo")
+        assert result["operation"] == "SORT"
+        assert result["column"] == "C"

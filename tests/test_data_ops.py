@@ -33,6 +33,31 @@ def sales_workbook(tmp_path):
     return str(filepath)
 
 
+@pytest.fixture
+def salary_workbook(tmp_path):
+    """Workbook whose headers are NOT part of the built-in vocabulary."""
+    filepath = tmp_path / "salary.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Payroll"
+
+    ws["A1"] = "Employee"
+    ws["B1"] = "Salary"
+
+    rows = [
+        ("Amit", 70000),
+        ("Rahul", 50000),
+        ("Sunil", 80000),
+        ("Priya", 60000),
+    ]
+    for i, (name, sal) in enumerate(rows, start=2):
+        ws[f"A{i}"] = name
+        ws[f"B{i}"] = sal
+
+    wb.save(filepath)
+    return str(filepath)
+
+
 class TestSort:
     def test_sort_column(self, sales_workbook):
         copilot = ExcelCopilot(sales_workbook)
@@ -46,6 +71,39 @@ class TestSort:
         ws = wb["Sales"]
         assert ws["A2"].value == "Pencil"
         assert ws["A7"].value == "Marker"
+
+    def test_sort_column_descending(self, sales_workbook):
+        copilot = ExcelCopilot(sales_workbook)
+        result = copilot.process_command("Column B ko descending order mein sort karo")
+        assert result["success"] is True
+
+        copilot.excel.save()
+        wb = openpyxl.load_workbook(sales_workbook)
+        ws = wb["Sales"]
+        # Largest revenue should now be first
+        assert ws["A2"].value == "Marker"  # 300
+        assert ws["A7"].value == "Pencil"  # 50
+
+    def test_descending_sort_keeps_blank_rows_last(self, tmp_path):
+        """Blank rows must stay at the bottom even when sorting descending."""
+        filepath = tmp_path / "blanks.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Month"
+        ws["B1"] = "Revenue"
+        for i, (m, r) in enumerate([("Jan", 10), ("Feb", 30), ("Mar", 20)], start=2):
+            ws[f"A{i}"] = m
+            ws[f"B{i}"] = r
+        wb.save(filepath)
+
+        copilot = ExcelCopilot(filepath)
+        result = copilot.process_command("Revenue ko descending order mein sort karo")
+        assert result["success"] is True
+        copilot.excel.save()
+
+        ws = openpyxl.load_workbook(filepath).active
+        assert ws["A2"].value == "Feb"  # 30
+        assert ws["A4"].value == "Jan"  # 10
 
 
 class TestDedupe:
@@ -66,9 +124,7 @@ class TestDedupe:
 class TestFilter:
     def test_filter_greater_than(self, sales_workbook):
         copilot = ExcelCopilot(sales_workbook)
-        result = copilot.process_command(
-            "Filter data jahan Revenue 100 se zyada"
-        )
+        result = copilot.process_command("Filter data jahan Revenue 100 se zyada")
         assert result["success"] is True
         r = result["result"]
         assert r["matched"] == 2  # Eraser(200), Marker(300)
@@ -125,19 +181,33 @@ class TestAnalyze:
 class TestDataParser:
     def test_parse_sort(self):
         from backend.parser.parser import CommandParser
+
         parser = CommandParser()
         result = parser.parse("Column B sort karo")
         assert result["operation"] == "SORT"
         assert result["column"] == "B"
 
+    def test_parse_sort_descending(self):
+        from backend.parser.parser import CommandParser
+
+        parser = CommandParser()
+        result = parser.parse("Column B ko descending order mein sort karo")
+        assert result["operation"] == "SORT"
+        assert result["descending"] is True
+
+        result = parser.parse("Column B sort karo")
+        assert result["descending"] is False
+
     def test_parse_dedupe(self):
         from backend.parser.parser import CommandParser
+
         parser = CommandParser()
         result = parser.parse("Duplicate rows hata do")
         assert result["operation"] == "DEDUPE"
 
     def test_parse_filter(self):
         from backend.parser.parser import CommandParser
+
         parser = CommandParser()
         result = parser.parse("Filter data jahan Revenue 100 se zyada")
         assert result["operation"] == "FILTER"
@@ -147,6 +217,7 @@ class TestDataParser:
 
     def test_parse_chart(self):
         from backend.parser.parser import CommandParser
+
         parser = CommandParser()
         result = parser.parse("Sales ka chart bana do")
         assert result["operation"] == "CHART"
@@ -154,6 +225,52 @@ class TestDataParser:
 
     def test_parse_analyze(self):
         from backend.parser.parser import CommandParser
+
         parser = CommandParser()
         result = parser.parse("Is workbook ka analysis kar do")
         assert result["operation"] == "ANALYZE"
+
+
+class TestArbitraryHeaders:
+    """Issue #2: data operations must work for column headers that are not
+    part of the hardcoded NAMED_COLUMNS vocabulary."""
+
+    def test_chart_arbitrary_header(self, salary_workbook):
+        copilot = ExcelCopilot(salary_workbook)
+        result = copilot.process_command("Salary ka chart bana do")
+        assert result["success"] is True
+        assert result["result"]["chart"] == "Salary"
+
+        copilot.excel.save()
+        wb = openpyxl.load_workbook(salary_workbook)
+        assert len(wb["Payroll"]._charts) >= 1
+
+    def test_sort_arbitrary_header(self, salary_workbook):
+        copilot = ExcelCopilot(salary_workbook)
+        result = copilot.process_command("Salary sort karo")
+        assert result["success"] is True
+        assert result["written_count"] == 4
+
+        copilot.excel.save()
+        wb = openpyxl.load_workbook(salary_workbook)
+        ws = wb["Payroll"]
+        assert ws["A2"].value == "Rahul"  # lowest salary (50000)
+        assert ws["A5"].value == "Sunil"  # highest salary (80000)
+
+    def test_filter_arbitrary_header(self, salary_workbook):
+        copilot = ExcelCopilot(salary_workbook)
+        result = copilot.process_command("Filter data jahan Salary 60000 se zyada")
+        assert result["success"] is True
+        assert result["result"]["matched"] == 2
+
+        copilot.excel.save()
+        wb = openpyxl.load_workbook(salary_workbook)
+        ws = wb["Filtered"]
+        salaries = [ws.cell(row=r, column=2).value for r in range(2, ws.max_row + 1)]
+        assert sorted(salaries) == [70000, 80000]
+
+    def test_chart_message_uses_header_name(self, salary_workbook):
+        copilot = ExcelCopilot(salary_workbook)
+        result = copilot.process_command("Salary sort karo")
+        assert result["success"] is True
+        assert "by column Salary" in result["message"]

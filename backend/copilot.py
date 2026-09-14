@@ -2,7 +2,7 @@ import re
 
 from backend.excel.handler import ExcelHandler
 from backend.parser.parser import CommandParser, ParserError
-from backend.validator.validator import Validator, ValidationError
+from backend.validator.validator import ValidationError, Validator
 
 
 class HistoryEntry:
@@ -36,7 +36,6 @@ class ExcelCopilot:
         self.parser = CommandParser()
         self.validator = Validator(self.excel)
         self.history = []
-        self.interactive_mode = False
 
     def load_workbook(self, filepath):
         """Load a workbook for processing."""
@@ -48,13 +47,16 @@ class ExcelCopilot:
         Returns a dict with result, confirmation, and history.
         """
         try:
-            # Step 1: Parse into structured instruction
+            # Step 1: Refresh the parser's view of the workbook's column
+            # headers so arbitrary names (Salary, Orders, ...) are recognized.
+            if self.excel.workbook:
+                self.parser.set_headers(self.excel.get_headers(sheet_name))
+
+            # Step 2: Parse into structured instruction
             instruction = self.parser.parse(command)
 
-            # Step 2: Validate
-            operation = self.validator.validate_operation(
-                instruction.get("operation")
-            )
+            # Step 3: Validate
+            operation = self.validator.validate_operation(instruction.get("operation"))
             instruction["operation"] = operation
 
             # Step 3: Resolve data and execute
@@ -63,9 +65,7 @@ class ExcelCopilot:
             written_count = 0
 
             if operation in self.AGGREGATE_OPERATIONS:
-                result = self._handle_aggregate(
-                    instruction, sheet_name, allow_overwrite
-                )
+                result = self._handle_aggregate(instruction, sheet_name, allow_overwrite)
                 destination = instruction.get("destination")
 
             elif operation in (*self.BINARY_OPERATIONS, "DIFFERENCE", "GROWTH"):
@@ -83,31 +83,31 @@ class ExcelCopilot:
                     instruction, sheet_name, allow_overwrite
                 )
 
-            elif operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY",
-                               "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
-                               "DETECT_INVALID"):
+            elif operation in (
+                "SORT",
+                "DEDUPE",
+                "FILTER",
+                "FIND_EMPTY",
+                "STANDARDIZE_DATES",
+                "STANDARDIZE_NAMES",
+                "DETECT_INVALID",
+            ):
                 result, written_count = self._handle_data_operation(
                     instruction, sheet_name, allow_overwrite
                 )
 
             elif operation == "CHART":
-                result, written_count = self._handle_chart(
-                    instruction, sheet_name
-                )
+                result, written_count = self._handle_chart(instruction, sheet_name)
 
             elif operation == "ANALYZE":
-                result, written_count = self._handle_analyze(
-                    instruction, sheet_name
-                )
+                result, written_count = self._handle_analyze(instruction, sheet_name)
 
             # Step 4: Record history
             entry = HistoryEntry(command, instruction, result, destination)
             self.history.append(entry)
 
             # Step 5: Build confirmation
-            message = self._build_confirmation(
-                instruction, result, destination, written_count
-            )
+            message = self._build_confirmation(instruction, result, destination, written_count)
 
             return {
                 "success": True,
@@ -139,33 +139,35 @@ class ExcelCopilot:
         if instruction.get("whole_sheet"):
             values, used_range = self._get_whole_sheet_values(sheet_name)
             if not values:
-                raise ValidationError(
-                    "There are no numeric values in this sheet."
-                )
+                raise ValidationError("There are no numeric values in this sheet.")
             instruction["used_range"] = used_range
             instruction["values"] = values
             result = self.validator.execute(instruction)
             self._maybe_write_formula(
-                operation, used_range,
-                instruction.get("destination"), sheet_name,
-                instruction, allow_overwrite,
+                operation,
+                used_range,
+                instruction.get("destination"),
+                sheet_name,
+                instruction,
+                allow_overwrite,
             )
             return result
 
         # Named source: "Sales ka total karo"
         if instruction.get("named_source"):
             column = self._resolve_named_column(instruction["named_source"], sheet_name)
-            numeric_values, used_range = self.validator.validate_column(
-                column, sheet_name
-            )
+            numeric_values, used_range = self.validator.validate_column(column, sheet_name)
             instruction["column"] = column
             instruction["used_range"] = used_range
             instruction["values"] = numeric_values
             result = self.validator.execute(instruction)
             self._maybe_write_formula(
-                operation, used_range,
-                instruction.get("destination"), sheet_name,
-                instruction, allow_overwrite,
+                operation,
+                used_range,
+                instruction.get("destination"),
+                sheet_name,
+                instruction,
+                allow_overwrite,
             )
             return result
 
@@ -178,9 +180,12 @@ class ExcelCopilot:
             instruction["values"] = numeric_values
             result = self.validator.execute(instruction)
             self._maybe_write_formula(
-                operation, used_range,
-                instruction.get("destination"), sheet_name,
-                instruction, allow_overwrite,
+                operation,
+                used_range,
+                instruction.get("destination"),
+                sheet_name,
+                instruction,
+                allow_overwrite,
             )
             return result
 
@@ -194,8 +199,11 @@ class ExcelCopilot:
             instruction["values"] = values
             result = self.validator.execute(instruction)
             self._write_binary_formula_from_inputs(
-                instruction["inputs"], instruction.get("output"),
-                instruction.get("operation"), sheet_name, instruction,
+                instruction["inputs"],
+                instruction.get("output"),
+                instruction.get("operation"),
+                sheet_name,
+                instruction,
                 allow_overwrite,
             )
             return result
@@ -223,17 +231,19 @@ class ExcelCopilot:
             instruction["new"], instruction["old"] = new_val, old_val
             result = self.validator.execute(instruction)
             self._write_operand_formula(
-                inputs[0], inputs[1], "subtract_symbol_for_growth",
-                instruction.get("output"), sheet_name, instruction,
+                inputs[0],
+                inputs[1],
+                "subtract_symbol_for_growth",
+                instruction.get("output"),
+                sheet_name,
+                instruction,
             )
             return result, instruction.get("output"), 0
 
         # Cell-based binary: read operand values and compute
         inputs = instruction["inputs"]
         if len(inputs) != 2:
-            raise ParserError(
-                f"I need two values for {operation}, like 'B2 + C2'."
-            )
+            raise ParserError(f"I need two values for {operation}, like 'B2 + C2'.")
         a = self._read_operand_value(inputs[0], sheet_name)
         b = self._read_operand_value(inputs[1], sheet_name)
 
@@ -250,15 +260,11 @@ class ExcelCopilot:
 
         # Write formula when a destination is specified and inputs are cells
         if destination and self._is_cell_ref(inputs[0]):
-            self.validator.validate_destination(
-                destination, sheet_name, allow_overwrite
-            )
+            self.validator.validate_destination(destination, sheet_name, allow_overwrite)
             if operation == "DIFFERENCE":
                 formula = f"=ABS({inputs[0]}-{inputs[1]})"
             elif operation in self.BINARY_OPERATIONS:
-                formula = (
-                    f"={inputs[0]}{self.OP_SYMBOLS[operation]}{inputs[1]}"
-                )
+                formula = f"={inputs[0]}{self.OP_SYMBOLS[operation]}{inputs[1]}"
             self.excel.write_formula(destination, formula, sheet_name)
             instruction["formula"] = formula
             written_count = 1
@@ -277,11 +283,20 @@ class ExcelCopilot:
 
         if operation == "GROWTH":
             if len(named_inputs) < 2:
-                raise ParserError(
-                    "Growth needs two named columns, like 'February vs January'."
-                )
-            new_col = self._resolve_named_column(named_inputs[0], sheet_name)
-            old_col = self._resolve_named_column(named_inputs[1], sheet_name)
+                raise ParserError("Growth needs two named columns, like 'February vs January'.")
+            try:
+                new_col = self._resolve_named_column(named_inputs[0], sheet_name)
+                old_col = self._resolve_named_column(named_inputs[1], sheet_name)
+            except ValidationError:
+                # Month names are not column headers here, which means the
+                # workbook stores months as row values (month-per-row layout).
+                raise ValidationError(
+                    f"I couldn't find a column named '{named_inputs[0]}' in this sheet. "
+                    f"This workbook stores months as rows (e.g. a 'Month' column). "
+                    f"Month-over-month growth currently works when months are column "
+                    f"headers. Try a cell-based version instead, like 'B3 se B2 kitni "
+                    f"badhi'."
+                ) from None
             new_total, _, _ = self.excel.get_column_values(new_col, sheet_name)
             old_total, _, _ = self.excel.get_column_values(old_col, sheet_name)
             instruction["new"] = sum(new_total)
@@ -295,9 +310,7 @@ class ExcelCopilot:
 
         # Element-wise for the other binary ops
         if len(named_inputs) < 2:
-            raise ParserError(
-                f"{operation} needs two named columns, like 'Revenue and Expense'."
-            )
+            raise ParserError(f"{operation} needs two named columns, like 'Revenue and Expense'.")
 
         in1 = self._resolve_named_column(named_inputs[0], sheet_name)
         in2 = self._resolve_named_column(named_inputs[1], sheet_name)
@@ -308,9 +321,7 @@ class ExcelCopilot:
         start_row = min(min1, min2) if (min1 and min2) else (min1 or min2)
         end_row = max(max1, max2)
         if not start_row or not end_row:
-            raise ValidationError(
-                "I couldn't find numeric data for the named columns."
-            )
+            raise ValidationError("I couldn't find numeric data for the named columns.")
 
         # Determine output column
         named_output = instruction.get("named_output")
@@ -320,16 +331,12 @@ class ExcelCopilot:
         elif instruction.get("output"):
             out_col = instruction["output"][:1]
         else:
-            raise ParserError(
-                "Please specify an output column, like 'profit calculate kar do'."
-            )
+            raise ParserError("Please specify an output column, like 'profit calculate kar do'.")
 
         count = 0
         for row in range(start_row, end_row + 1):
             if operation in self.BINARY_OPERATIONS:
-                formula = (
-                    f"={in1}{row}{self.OP_SYMBOLS[operation]}{in2}{row}"
-                )
+                formula = f"={in1}{row}{self.OP_SYMBOLS[operation]}{in2}{row}"
             else:
                 formula = f"=ABS({in1}{row}-{in2}{row})"
             self.excel.write_formula(f"{out_col}{row}", formula, sheet_name)
@@ -340,32 +347,66 @@ class ExcelCopilot:
         return count, None, count
 
     def _handle_percentage(self, instruction, sheet_name, allow_overwrite):
-        """Handle percentage operations."""
+        """Handle percentage operations.
+
+        Percentages are computed as each value's share of the column total:
+          - with a destination column: row-by-row formulas are written
+            (e.g. ``=B2/6600*100``);
+          - without a destination: the per-row percentages are computed and
+            returned so the command never silently reports the column total.
+
+        A source column is required; if its total is zero percentages cannot
+        be computed and a clear error is raised.
+        """
         named_source = instruction.get("named_source")
+        column = None
         if named_source:
             column = self._resolve_named_column(named_source, sheet_name)
-            values, max_row, min_row = self.excel.get_column_values(column, sheet_name)
-            if not values:
-                raise ValidationError(
-                    f"There are no numeric values in the '{named_source}' column."
-                )
-            total = sum(values)
-            out_col = instruction.get("output_column") or instruction.get("output")
-            if out_col:
-                out_col = out_col[:1]
-                for row in range(min_row, max_row + 1):
-                    formula = f"={column}{row}/{total}*100"
-                    self.excel.write_formula(f"{out_col}{row}", formula, sheet_name)
-                return total, None, (max_row - min_row + 1)
-            instruction["total"] = total
-            return total, None, 0
-        raise ParserError(
-            "Please specify which column to calculate the percentage of, "
-            "like 'Sales ka percentage karma karo'."
-        )
+        elif instruction.get("column") or instruction.get("source"):
+            column = self._resolve_named_column(
+                instruction.get("column") or instruction.get("source"), sheet_name
+            )
+        if not column:
+            raise ParserError(
+                "Please specify which column to calculate the percentage of, "
+                "like 'Sales ka percentage karo'."
+            )
 
-    def _handle_conditional(self, instruction, sheet_name=None,
-                            allow_overwrite=False):
+        source_label = named_source if named_source else column
+        values, max_row, min_row = self.excel.get_column_values(column, sheet_name)
+        if not values:
+            raise ValidationError(f"There are no numeric values in the '{source_label}' column.")
+        total = sum(values)
+        if total == 0:
+            raise ValidationError(
+                f"The total of the '{source_label}' column is 0, so "
+                f"percentages cannot be calculated."
+            )
+
+        # A destination cell/column implies row-by-row share-of-total formulas.
+        out_col = (
+            instruction.get("output_column")
+            or instruction.get("output")
+            or instruction.get("destination")
+        )
+        if out_col:
+            out_col = out_col[:1]
+            self.validator.validate_destination(f"{out_col}{min_row}", sheet_name, allow_overwrite)
+            for row in range(min_row, max_row + 1):
+                formula = f"={column}{row}/{total}*100"
+                self.excel.write_formula(f"{out_col}{row}", formula, sheet_name)
+            instruction["total"] = total
+            instruction["output_column"] = out_col
+            return total, None, (max_row - min_row + 1)
+
+        # No destination: report each value's share of the column total.
+        percentages = [round(v / total * 100, 2) for v in values]
+        instruction["total"] = total
+        instruction["values"] = values
+        instruction["percentages"] = percentages
+        return percentages, None, 0
+
+    def _handle_conditional(self, instruction, sheet_name=None, allow_overwrite=False):
         """Handle SUMIF / COUNTIF / AVERAGEIF.
 
         The instruction carries:
@@ -441,6 +482,7 @@ class ExcelCopilot:
         matched = sum(1 for keep in mask if keep)
 
         from backend.calculator.engine import CalculationEngine
+
         if operation == "SUMIF":
             result = CalculationEngine.sum(values)
         elif operation == "AVERAGEIF":
@@ -458,8 +500,7 @@ class ExcelCopilot:
 
         destination = instruction.get("destination")
         if destination:
-            self.validator.validate_destination(destination, sheet_name,
-                                                allow_overwrite)
+            self.validator.validate_destination(destination, sheet_name, allow_overwrite)
             crit = criteria[0]
             crit_letter = self._resolve_named_column(crit[0], sheet_name)
             if operation == "COUNTIF":
@@ -482,7 +523,7 @@ class ExcelCopilot:
         sym = {"==": "=", ">": ">", "<": "<", ">=": ">=", "<=": "<="}[operator]
         if isinstance(value, str):
             return f'"{value}"'
-        return f'{sym}{value}'
+        return f"{sym}{value}"
 
     @staticmethod
     def _coerce(v):
@@ -498,12 +539,14 @@ class ExcelCopilot:
     # Helpers
     # ------------------------------------------------------------------ #
 
-    def _handle_data_operation(self, instruction, sheet_name=None,
-                               allow_overwrite=False):
+    def _handle_data_operation(self, instruction, sheet_name=None, allow_overwrite=False):
         """Handle SORT / DEDUPE / FILTER / FIND_EMPTY and data cleaning
         operations. Returns (result, count)."""
         operation = instruction["operation"]
         column = instruction.get("column")
+
+        # Keep the parsed source (name or letter) for friendly confirmations.
+        instruction["source_name"] = column
 
         # Resolve named column letters
         col_letter = None
@@ -511,8 +554,11 @@ class ExcelCopilot:
             col_letter = self._resolve_named_column(column, sheet_name)
 
         if operation == "SORT":
+            ascending = not bool(instruction.get("descending"))
             if col_letter:
-                count = self.excel.sort_sheet(col_letter, sheet_name=sheet_name)
+                count = self.excel.sort_sheet(
+                    col_letter, ascending=ascending, sheet_name=sheet_name
+                )
                 return {"column": col_letter, "rows": count}, count
             # Sort by the first numeric-friendly column
             sheet = self.excel.get_sheet(sheet_name)
@@ -524,7 +570,7 @@ class ExcelCopilot:
                     target = col
                     break
             col_letter = self.excel.get_column_letter(target)
-            count = self.excel.sort_sheet(col_letter, sheet_name=sheet_name)
+            count = self.excel.sort_sheet(col_letter, ascending=ascending, sheet_name=sheet_name)
             return {"column": col_letter, "rows": count}, count
 
         elif operation == "DEDUPE":
@@ -533,35 +579,29 @@ class ExcelCopilot:
 
         elif operation == "STANDARDIZE_DATES":
             col_letter = col_letter or None
-            converted, total = self.excel.standardize_dates(
-                col_letter, sheet_name
-            )
+            converted, total = self.excel.standardize_dates(col_letter, sheet_name)
             return {"converted": converted, "total": total}, converted
 
         elif operation == "STANDARDIZE_NAMES":
-            converted, checked = self.excel.standardize_names(
-                col_letter, sheet_name
-            )
+            converted, checked = self.excel.standardize_names(col_letter, sheet_name)
             return {"converted": converted, "checked": checked}, converted
 
         elif operation == "DETECT_INVALID":
-            issues, candidates = self.excel.detect_invalid_values(
-                col_letter, sheet_name
-            )
+            issues, candidates = self.excel.detect_invalid_values(col_letter, sheet_name)
             return {"count": len(issues), "issues": issues[:50]}, len(issues)
 
         elif operation == "FILTER":
             operator = instruction.get("operator")
             value = instruction.get("value")
             if not col_letter or operator is None or value is None:
-                raise ParserError(
-                    "I need a filter condition like 'Revenue 1000 se zyada'."
-                )
-            matched, total = self.excel.filter_rows(
-                col_letter, operator, value, sheet_name
-            )
-            return {"matched": matched, "total": total,
-                    "column": col_letter, "value": value}, matched
+                raise ParserError("I need a filter condition like 'Revenue 1000 se zyada'.")
+            matched, total = self.excel.filter_rows(col_letter, operator, value, sheet_name)
+            return {
+                "matched": matched,
+                "total": total,
+                "column": col_letter,
+                "value": value,
+            }, matched
 
         elif operation == "FIND_EMPTY":
             empty = self.excel.find_empty_cells(col_letter, sheet_name)
@@ -573,15 +613,13 @@ class ExcelCopilot:
         """Handle CHART."""
         column = instruction.get("column")
         if not column:
-            raise ParserError(
-                "Please specify a column to chart, like 'Sales ka chart bana do'."
-            )
+            raise ParserError("Please specify a column to chart, like 'Sales ka chart bana do'.")
         col_letter = self._resolve_named_column(column, sheet_name)
         chart_type = "line" if instruction.get("line_chart") else "column"
         try:
             info = self.excel.create_chart(col_letter, sheet_name, chart_type)
         except ValueError as e:
-            raise ValidationError(str(e))
+            raise ValidationError(str(e)) from e
         return {"chart": info["title"], "source": info["source"]}, info["rows"]
 
     def _handle_analyze(self, instruction, sheet_name=None):
@@ -607,7 +645,7 @@ class ExcelCopilot:
                 total_insights += 1
             for t in trends:
                 summary.append(f"  Trend: {t}")
-            for label, value, mean, stdev, i in anomalies:
+            for label, value, mean, stdev, _i in anomalies:
                 summary.append(
                     f"  Anomaly: {label} {value} is "
                     f"{abs(value - mean) / stdev:.1f} std devs from the "
@@ -616,8 +654,11 @@ class ExcelCopilot:
                 total_insights += 1
 
         self._write_analysis_sheet("\n".join(summary), sheet_name)
-        return {"sheets": list(report.keys()), "insights": total_insights,
-                "lines": summary}, total_insights
+        return {
+            "sheets": list(report.keys()),
+            "insights": total_insights,
+            "lines": summary,
+        }, total_insights
 
     def _write_analysis_sheet(self, text, sheet_name=None, max_cols=6):
         """Write the analysis text into an 'Analysis Report' sheet."""
@@ -638,9 +679,7 @@ class ExcelCopilot:
             if not create:
                 sheet = self.excel.get_sheet(sheet_name)
                 if self.excel.get_column_number(column) > sheet.max_column:
-                    raise ValidationError(
-                        f"I couldn't find Column {column} in this sheet."
-                    )
+                    raise ValidationError(f"I couldn't find Column {column} in this sheet.")
             return column
 
         column = self.excel.get_column_by_name(name, sheet_name)
@@ -649,12 +688,11 @@ class ExcelCopilot:
             sheet = self.excel.get_sheet(sheet_name)
             col_idx = sheet.max_column + 1
             from openpyxl.utils import get_column_letter
+
             column = get_column_letter(col_idx)
             sheet.cell(row=1, column=col_idx).value = name.capitalize()
         if column is None:
-            raise ValidationError(
-                f"I couldn't find a column named '{name}' in this sheet."
-            )
+            raise ValidationError(f"I couldn't find a column named '{name}' in this sheet.")
         return column
 
     def _get_whole_sheet_values(self, sheet_name=None):
@@ -677,8 +715,9 @@ class ExcelCopilot:
                         pass
         return values, used_range
 
-    def _maybe_write_formula(self, operation, used_range, destination,
-                             sheet_name, instruction, allow_overwrite=False):
+    def _maybe_write_formula(
+        self, operation, used_range, destination, sheet_name, instruction, allow_overwrite=False
+    ):
         """Write an aggregate formula to a destination cell if requested."""
         if destination:
             self.validator.validate_destination(destination, sheet_name, allow_overwrite)
@@ -686,9 +725,9 @@ class ExcelCopilot:
             self.excel.write_formula(destination, formula, sheet_name)
             instruction["formula"] = formula
 
-    def _write_binary_formula_from_inputs(self, inputs, output, operation,
-                                          sheet_name, instruction,
-                                          allow_overwrite=False):
+    def _write_binary_formula_from_inputs(
+        self, inputs, output, operation, sheet_name, instruction, allow_overwrite=False
+    ):
         """Write a formula for an aggregate operation over explicit cells."""
         if output and self._is_cell_ref(inputs[0]) and self._is_cell_ref(inputs[1]):
             if operation == "SUM":
@@ -699,8 +738,7 @@ class ExcelCopilot:
             self.excel.write_formula(output, formula, sheet_name)
             instruction["formula"] = formula
 
-    def _write_operand_formula(self, a, b, symbol, destination, sheet_name,
-                               instruction):
+    def _write_operand_formula(self, a, b, symbol, destination, sheet_name, instruction):
         """Write a growth/difference formula between two cell refs."""
         if destination and self._is_cell_ref(a) and self._is_cell_ref(b):
             if symbol == "subtract_symbol_for_growth":
@@ -720,15 +758,11 @@ class ExcelCopilot:
         try:
             return float(ref)
         except ValueError:
-            raise ValidationError(
-                f"I couldn't understand the value '{ref}'."
-            )
+            raise ValidationError(f"I couldn't understand the value '{ref}'.") from None
 
     def _is_cell_ref(self, ref):
         """Check if a string looks like a cell reference (e.g. B2)."""
-        return isinstance(ref, str) and bool(
-            re.fullmatch(r"[A-Z]{1,2}\d+", ref)
-        )
+        return isinstance(ref, str) and bool(re.fullmatch(r"[A-Z]{1,2}\d+", ref))
 
     def _get_numeric_value(self, ref, sheet_name=None):
         """Get a numeric value from a cell reference."""
@@ -737,13 +771,9 @@ class ExcelCopilot:
             try:
                 return float(val)
             except ValueError:
-                raise ValidationError(
-                    f"Cell {ref} doesn't contain a number."
-                )
+                raise ValidationError(f"Cell {ref} doesn't contain a number.") from None
         if not isinstance(val, (int, float)):
-            raise ValidationError(
-                f"Cell {ref} doesn't contain a number."
-            )
+            raise ValidationError(f"Cell {ref} doesn't contain a number.")
         return val
 
     def _error(self, message):
@@ -765,9 +795,9 @@ class ExcelCopilot:
         # Data operation messages
         if op == "SORT":
             col = result.get("column") if isinstance(result, dict) else None
-            return (
-                f"Done. I sorted {written_count} rows"
-                + (f" by column {col}." if col else ".")
+            source = self._display_source(instruction.get("source_name") or col)
+            return f"Done. I sorted {written_count} rows" + (
+                f" by column {source}." if source else "."
             )
         if op == "DEDUPE":
             if not written_count:
@@ -776,17 +806,12 @@ class ExcelCopilot:
             preview = r.get("preview", [])
             preview_text = ""
             if preview:
-                sample = " | ".join(", ".join(str(v) for v in row)
-                                    for row in preview[:2])
+                sample = " | ".join(", ".join(str(v) for v in row) for row in preview[:2])
                 preview_text = f" Example removed rows: {sample}."
-            return (
-                f"Done. I removed {written_count} duplicate row(s)."
-                f"{preview_text}"
-            )
+            return f"Done. I removed {written_count} duplicate row(s).{preview_text}"
         if op == "FILTER":
             r = result if isinstance(result, dict) else {}
-            val = r.get("value", "")
-            col = r.get("column", "")
+            col = self._display_source(instruction.get("source_name") or r.get("column", ""))
             return (
                 f"Done. I kept {r.get('matched', 0)} of "
                 f"{r.get('total', 0)} rows matching the filter on {col}."
@@ -801,35 +826,23 @@ class ExcelCopilot:
             return f"Found {written_count} empty cell(s): {preview}{more}."
         if op == "STANDARDIZE_DATES":
             r = result if isinstance(result, dict) else {}
-            return (
-                f"Done. I standardized {r.get('converted', 0)} date(s) "
-                f"to DD-MM-YYYY format."
-            )
+            return f"Done. I standardized {r.get('converted', 0)} date(s) to DD-MM-YYYY format."
         if op == "STANDARDIZE_NAMES":
             r = result if isinstance(result, dict) else {}
-            return (
-                f"Done. I title-cased {r.get('converted', 0)} name(s)."
-            )
+            return f"Done. I title-cased {r.get('converted', 0)} name(s)."
         if op == "DETECT_INVALID":
             if not written_count:
                 return "No invalid values were found."
             r = result if isinstance(result, dict) else {}
             issues = r.get("issues", [])
-            preview = "; ".join(
-                f"{ref} ({why})" for ref, why in issues[:8]
-            )
+            preview = "; ".join(f"{ref} ({why})" for ref, why in issues[:8])
             more = f" and {written_count - 8} more" if len(issues) > 8 else ""
-            return (
-                f"Found {written_count} invalid value(s): {preview}{more}."
-            )
+            return f"Found {written_count} invalid value(s): {preview}{more}."
         if op in ("SUMIF", "COUNTIF", "AVERAGEIF"):
             matched = instruction.get("matched", 0)
-            agg = {"SUMIF": "summed", "COUNTIF": "counted",
-                   "AVERAGEIF": "averaged"}[op]
+            agg = {"SUMIF": "summed", "COUNTIF": "counted", "AVERAGEIF": "averaged"}[op]
             crits = instruction.get("criteria", [])
-            desc = " and ".join(
-                f"{c[0]} {c[1]} {c[2]}" for c in crits
-            )
+            desc = " and ".join(f"{c[0]} {c[1]} {c[2]}" for c in crits)
             if destination:
                 return (
                     f"Done. I {agg} {matched} matching cell(s) where {desc} "
@@ -839,18 +852,50 @@ class ExcelCopilot:
         if op == "CHART":
             r = result if isinstance(result, dict) else {}
             return (
-                f"Done. I created a chart for '{r.get('chart')}' "
-                f"from {written_count} rows of data."
+                f"Done. I created a chart for '{r.get('chart')}' from {written_count} rows of data."
             )
         if op == "ANALYZE":
             r = result if isinstance(result, dict) else {}
             if r.get("lines"):
                 top = "\n".join(r["lines"][:5])
-                return (
-                    f"Analysis complete across {len(r.get('sheets', []))} sheet(s).\n"
-                    f"{top}"
-                )
+                return f"Analysis complete across {len(r.get('sheets', []))} sheet(s).\n{top}"
             return "Analysis complete."
+        if op == "GROWTH":
+            named_inputs = instruction.get("named_inputs")
+            inputs = instruction.get("inputs")
+            if named_inputs and len(named_inputs) >= 2:
+                old_name = self._display_source(named_inputs[1])
+                new_name = self._display_source(named_inputs[0])
+                location = f"Growth from {old_name} to {new_name}"
+            elif inputs and len(inputs) >= 2:
+                location = f"Growth from {inputs[1]} to {inputs[0]}"
+            else:
+                location = "Growth"
+            percent = result
+            if percent is not None:
+                percent = round(percent, 2)
+                if float(percent).is_integer():
+                    percent = int(percent)
+            return f"Done. {location} is {percent}%."
+        if op == "PERCENTAGE":
+            named = (
+                instruction.get("named_source")
+                or instruction.get("column")
+                or instruction.get("source", "")
+            )
+            total = instruction.get("total", 0)
+            out_col = instruction.get("output_column")
+            if out_col and written_count:
+                return (
+                    f"Done. I wrote {written_count} percentage formula(s) to "
+                    f"column {out_col} (each value of {named} as a % of its "
+                    f"total {total})."
+                )
+            pcts = instruction.get("percentages", [])
+            preview = ", ".join(self._format_percent(p) for p in pcts[:8])
+            if len(pcts) > 8:
+                preview += f" and {len(pcts) - 8} more"
+            return f"Done. Each value of {named} as a % of its total ({total}): {preview}."
 
         source = instruction.get("column") or instruction.get("source")
         used_range = instruction.get("used_range")
@@ -864,7 +909,6 @@ class ExcelCopilot:
         else:
             inputs = instruction.get("inputs", [])
             if inputs:
-                op_symbol = self.OP_SYMBOLS.get(op, " + ")
                 display = " and ".join(str(i) for i in inputs[:2])
                 location = f"{display} ({op.title()})"
             else:
@@ -878,8 +922,7 @@ class ExcelCopilot:
 
         if destination:
             return (
-                f"Done. I calculated {location} = {result} "
-                f"and placed the result in {destination}."
+                f"Done. I calculated {location} = {result} and placed the result in {destination}."
             )
         else:
             return f"Done. The result of {location} is {result}."
@@ -887,6 +930,59 @@ class ExcelCopilot:
     # ------------------------------------------------------------------ #
     # Interactive loop
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _display_source(value):
+        """Return a friendly display name for a column source.
+
+        Column letters are shown as-is; workbook header names are
+        title-cased (e.g. 'salary' -> 'Salary').
+        """
+        if isinstance(value, str) and len(value) > 1:
+            return value.title()
+        return value
+
+    @staticmethod
+    def _format_percent(value):
+        """Format a percentage number without trailing zero noise."""
+        rounded = round(value, 2)
+        if float(rounded).is_integer():
+            return f"{int(rounded)}%"
+        return f"{rounded}%"
+
+    @staticmethod
+    def _is_overwrite_confirmation(result):
+        """Return True when a command only failed because a destination
+        already contains data and an overwrite decision is needed."""
+        if not isinstance(result, dict):
+            return False
+        message = result.get("message", "")
+        return not result.get("success", True) and "already contains data" in message
+
+    def process_interactive(self, command, sheet_name=None):
+        """Process a command in an interactive session.
+
+        If writing to a destination would overwrite existing data, the user
+        is prompted for permission (just like the web UI confirms). Returns
+        the final result dict, or ``None`` if the user chose to quit while
+        answering the prompt.
+        """
+        result = self.process_command(command, sheet_name=sheet_name)
+
+        if self._is_overwrite_confirmation(result):
+            print("-" * 40)
+            print(result["message"])
+            try:
+                choice = input("Replace it? [Yes/No]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                return None
+            if choice in ("y", "ye", "yes", "ha", "haan"):
+                result = self.process_command(command, sheet_name=sheet_name, allow_overwrite=True)
+            else:
+                print("OK, I didn't change anything.")
+
+        return result
 
     def run_interactive(self, filepath=None):
         """Run an interactive command loop."""
@@ -918,25 +1014,7 @@ class ExcelCopilot:
                 self._print_history()
                 continue
 
-            result = self.process_command(command)
-
-            # Overwrite confirmation (Phase 6)
-            if (not result["success"]
-                    and "already contains data" in result["message"]
-                    and self.interactive_mode):
-                print("-" * 40)
-                print(result["message"])
-                try:
-                    choice = input("Replace it? [Yes/No]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    print("\nGoodbye!")
-                    break
-                if choice in ("y", "ye", "yes", "ha", "haan"):
-                    result = self.process_command(
-                        command, allow_overwrite=True
-                    )
-                else:
-                    print("OK, I didn't change anything.")
+            result = self.process_interactive(command)
 
             self._print_result(result)
 

@@ -1,9 +1,9 @@
-from datetime import datetime, date
 import re
+from datetime import date, datetime
 
 import openpyxl
-from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 
 class ExcelHandler:
@@ -17,8 +17,15 @@ class ExcelHandler:
 
     def load(self, filepath):
         """Load an Excel workbook from filepath."""
-        self.filepath = filepath
-        self.workbook = openpyxl.load_workbook(filepath)
+        import os
+
+        filepath_str = str(filepath)
+        if not os.path.exists(filepath_str):
+            raise FileNotFoundError(f"File not found: {filepath}")
+        if not filepath_str.endswith((".xlsx", ".xlsm", ".xls")):
+            raise ValueError("File must be an Excel workbook (.xlsx, .xlsm, or .xls)")
+        self.filepath = filepath_str
+        self.workbook = openpyxl.load_workbook(filepath_str)
         return self.workbook
 
     def create(self, filepath=None):
@@ -38,12 +45,20 @@ class ExcelHandler:
 
     def get_sheet_names(self):
         """Return list of sheet names."""
+        if not self.workbook:
+            raise ValueError("No workbook loaded")
         return self.workbook.sheetnames
 
     def get_sheet(self, name=None):
         """Get a worksheet by name or active sheet."""
+        if not self.workbook:
+            raise ValueError("No workbook loaded")
         if name is None:
             return self.workbook.active
+        if name not in self.workbook.sheetnames:
+            raise ValueError(
+                f"Sheet '{name}' not found. Available: {', '.join(self.workbook.sheetnames)}"
+            )
         return self.workbook[name]
 
     def get_cell_value(self, cell_ref, sheet_name=None):
@@ -181,6 +196,16 @@ class ExcelHandler:
         """Get column number from letter."""
         return column_index_from_string(letter)
 
+    def get_headers(self, sheet_name=None):
+        """Return the header values from the first row, lowercased."""
+        sheet = self.get_sheet(sheet_name)
+        headers = []
+        for col in range(sheet.min_column, sheet.max_column + 1):
+            value = sheet.cell(row=sheet.min_row, column=col).value
+            if value is not None:
+                headers.append(str(value).strip().lower())
+        return headers
+
     def get_column_by_name(self, name, sheet_name=None):
         """Find a column letter by matching its header text.
         Matches case-insensitively and ignores trailing spaces/percent.
@@ -208,8 +233,10 @@ class ExcelHandler:
         """Read all used rows as lists of values."""
         rows = []
         for row in sheet.iter_rows(
-            min_row=sheet.min_row, max_row=sheet.max_row,
-            min_col=sheet.min_column, max_col=sheet.max_column,
+            min_row=sheet.min_row,
+            max_row=sheet.max_row,
+            min_col=sheet.min_column,
+            max_col=sheet.max_column,
         ):
             rows.append([cell.value for cell in row])
         return rows
@@ -217,8 +244,10 @@ class ExcelHandler:
     def _write_rows(self, sheet, rows):
         """Overwrite the used range with the given rows (clears leftovers)."""
         for row in sheet.iter_rows(
-            min_row=sheet.min_row, max_row=sheet.max_row,
-            min_col=sheet.min_column, max_col=sheet.max_column,
+            min_row=sheet.min_row,
+            max_row=sheet.max_row,
+            min_col=sheet.min_column,
+            max_col=sheet.max_column,
         ):
             for cell in row:
                 cell.value = None
@@ -229,6 +258,8 @@ class ExcelHandler:
 
     def sort_sheet(self, column, ascending=True, sheet_name=None):
         """Sort the sheet by a column, keeping the header row on top.
+        Rows with a blank value in the sort column are always kept at the
+        bottom (Excel-style) regardless of the sort direction.
         Returns the number of data rows sorted.
         """
         sheet = self.get_sheet(sheet_name)
@@ -243,17 +274,41 @@ class ExcelHandler:
         header = rows[0]
         data = rows[1:]
 
-        def key(row):
-            value = row[col_index - 1] if col_index <= len(row) else None
-            try:
-                return (float(value),)
-            except (TypeError, ValueError):
-                return (float("inf"), str(value or ""))
+        def value_of(row):
+            return row[col_index - 1] if col_index <= len(row) else None
 
-        data.sort(key=key, reverse=not ascending)
+        with_value = []
+        blank = []
+        for row in data:
+            value = value_of(row)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                blank.append(row)
+            else:
+                with_value.append(row)
 
-        self._write_rows(sheet, [header] + data)
+        if ascending:
+            with_value.sort(key=lambda row: self._sort_key_asc(value_of(row)))
+        else:
+            with_value.sort(key=lambda row: self._sort_key_desc(value_of(row)))
+
+        self._write_rows(sheet, [header] + with_value + blank)
         return len(data)
+
+    @staticmethod
+    def _sort_key_asc(value):
+        """Ascending sort key: numbers first, then text, blanks handled outside."""
+        try:
+            return (0, float(value))
+        except (TypeError, ValueError):
+            return (1, str(value).lower())
+
+    @staticmethod
+    def _sort_key_desc(value):
+        """Descending sort key: numbers descending first, then text, then blanks."""
+        try:
+            return (0, -float(value))
+        except (TypeError, ValueError):
+            return (1, str(value).lower())
 
     def remove_duplicates(self, sheet_name=None):
         """Remove fully-duplicate rows, keeping the first occurrence.
@@ -367,9 +422,19 @@ class ExcelHandler:
         Returns None if the text is not a recognizable date.
         """
         text = str(text).strip()
-        for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
-                    "%d-%m-%y", "%d/%m/%y", "%m/%d/%Y", "%d %b %Y",
-                    "%b %d, %Y", "%B %d, %Y", "%d %B %Y"):
+        for fmt in (
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%d-%m-%y",
+            "%d/%m/%y",
+            "%m/%d/%Y",
+            "%d %b %Y",
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%d %B %Y",
+        ):
             try:
                 return datetime.strptime(text, fmt).date()
             except ValueError:
@@ -415,9 +480,18 @@ class ExcelHandler:
     @staticmethod
     def _is_name_header(text):
         header = str(text).strip().lower()
-        return header in ("name", "names", "naam", "customer",
-                          "customername", "client", "product",
-                          "employee", "person", "user")
+        return header in (
+            "name",
+            "names",
+            "naam",
+            "customer",
+            "customername",
+            "client",
+            "product",
+            "employee",
+            "person",
+            "user",
+        )
 
     def standardize_names(self, column=None, sheet_name=None):
         """Title-case text cells in the first name-like column
@@ -539,15 +613,12 @@ class ExcelHandler:
             raise ValueError("Not enough data to chart.")
 
         title = str(sheet.cell(row=1, column=col_index).value or f"Column {col_letter}")
-        data_ref = Reference(
-            sheet, min_col=col_index, min_row=1, max_row=max_row
-        )
+        data_ref = Reference(sheet, min_col=col_index, min_row=1, max_row=max_row)
 
         # Use the first column as categories if it has data
         cats = None
         first_col_has = any(
-            sheet.cell(row=r, column=1).value is not None
-            for r in range(1, max_row + 1)
+            sheet.cell(row=r, column=1).value is not None for r in range(1, max_row + 1)
         )
         if first_col_has and col_index != 1:
             cats = Reference(sheet, min_col=1, min_row=2, max_row=max_row)
@@ -584,9 +655,7 @@ class ExcelHandler:
 
             for col in range(1, max_col + 1):
                 header = sheet.cell(row=sheet.min_row, column=col).value
-                values, max_row, min_row = self.get_column_values(
-                    get_column_letter(col), name
-                )
+                values, max_row, min_row = self.get_column_values(get_column_letter(col), name)
                 if not values:
                     continue
                 label = header or get_column_letter(col)
@@ -594,19 +663,20 @@ class ExcelHandler:
                 avg = sum(values) / len(values)
                 high = max(values)
                 low = min(values)
-                insights.append({
-                    "column": label,
-                    "total": round(total, 2),
-                    "average": round(avg, 2),
-                    "max": high,
-                    "min": low,
-                    "count": len(values),
-                })
+                insights.append(
+                    {
+                        "column": label,
+                        "total": round(total, 2),
+                        "average": round(avg, 2),
+                        "max": high,
+                        "min": low,
+                        "count": len(values),
+                    }
+                )
 
             trends = self._detect_trends(sheet)
             anomalies = self._detect_anomalies(sheet)
-            report[name] = {"metrics": insights, "trends": trends,
-                            "anomalies": anomalies}
+            report[name] = {"metrics": insights, "trends": trends, "anomalies": anomalies}
 
         return report
 
@@ -616,9 +686,7 @@ class ExcelHandler:
 
         anomalies = []
         for col in range(sheet.min_column, sheet.max_column + 1):
-            values, max_row, min_row = self.get_column_values(
-                get_column_letter(col), sheet.title
-            )
+            values, max_row, min_row = self.get_column_values(get_column_letter(col), sheet.title)
             if len(values) < 3:
                 continue
             header = sheet.cell(row=sheet.min_row, column=col).value
@@ -639,15 +707,18 @@ class ExcelHandler:
         for col in range(sheet.min_column, sheet.max_column + 1):
             header = sheet.cell(row=sheet.min_row, column=col).value
             if header and str(header).lower() in (
-                "month", "date", "name", "product", "year", "category",
+                "month",
+                "date",
+                "name",
+                "product",
+                "year",
+                "category",
             ):
                 label_col = col
                 break
 
         for col in range(sheet.min_column, sheet.max_column + 1):
-            values, max_row, min_row = self.get_column_values(
-                get_column_letter(col), sheet.title
-            )
+            values, max_row, min_row = self.get_column_values(get_column_letter(col), sheet.title)
             if len(values) < 2:
                 continue
             header = sheet.cell(row=sheet.min_row, column=col).value or "data"
@@ -666,17 +737,17 @@ class ExcelHandler:
             if best_growth:
                 label = ""
                 if label_col:
-                    label = str(sheet.cell(row=min_row + best_growth[0], column=label_col).value or "")
+                    label = str(
+                        sheet.cell(row=min_row + best_growth[0], column=label_col).value or ""
+                    )
                     label = f" ({label})"
-                trends.append(
-                    f"{header} rose {best_growth[2]:.1f}% to {best_growth[1]}{label}"
-                )
+                trends.append(f"{header} rose {best_growth[2]:.1f}% to {best_growth[1]}{label}")
             if best_drop and best_drop[2] < 0:
                 label = ""
                 if label_col:
-                    label = str(sheet.cell(row=min_row + best_drop[0], column=label_col).value or "")
+                    label = str(
+                        sheet.cell(row=min_row + best_drop[0], column=label_col).value or ""
+                    )
                     label = f" ({label})"
-                trends.append(
-                    f"{header} fell {abs(best_drop[2]):.1f}% to {best_drop[1]}{label}"
-                )
+                trends.append(f"{header} fell {abs(best_drop[2]):.1f}% to {best_drop[1]}{label}")
         return trends

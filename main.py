@@ -3,6 +3,7 @@ import os
 import sys
 
 from backend.copilot import ExcelCopilot
+from backend.voice.listener import VoiceError, VoiceListener
 
 
 def main():
@@ -15,7 +16,8 @@ def main():
         help="Path to an Excel workbook to open",
     )
     parser.add_argument(
-        "-c", "--command",
+        "-c",
+        "--command",
         help="Run a single command instead of interactive mode",
     )
     parser.add_argument(
@@ -44,6 +46,7 @@ def main():
     # Web UI mode
     if args.serve:
         from backend.api.app import create_app
+
         app_file = args.filepath
         app = create_app(initial_filepath=app_file)
         print(f"Excel AI Copilot web UI running on http://localhost:{args.port}")
@@ -77,13 +80,7 @@ def main():
 
     # Voice mode: wrap the interactive loop with speech-to-text input
     if args.voice:
-        try:
-            from backend.voice.listener import VoiceListener, VoiceError
-        except ImportError as e:
-            print(e)
-            sys.exit(1)
         listener = VoiceListener()
-        copilot.interactive_mode = True
         run_voice_loop(copilot, listener, args.filepath)
         return
 
@@ -126,7 +123,11 @@ def run_voice_loop(copilot, listener, filepath=None):
             copilot._print_history()
             continue
 
-        result = copilot.process_command(command)
+        result = copilot.process_interactive(command)
+        if result is None:
+            print("Goodbye!")
+            break
+
         copilot._print_result(result)
 
         if result["success"] and copilot.excel.filepath:

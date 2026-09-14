@@ -1,5 +1,4 @@
 import re
-from openpyxl.utils import column_index_from_string
 
 
 class ParserError(Exception):
@@ -96,15 +95,73 @@ class CommandParser:
 
     # Vocabulary of common data column names (English + Hinglish).
     NAMED_COLUMNS = {
-        "january", "february", "march", "april", "june", "july",
-        "august", "september", "october", "november", "december",
-        "revenue", "expense", "profit", "sales", "cost", "income",
-        "loss", "quantity", "price", "amount", "total",
-        "bikri", "kharcha", "munafa", "aukhat", "sale", "bechne",
+        "january",
+        "february",
+        "march",
+        "april",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "revenue",
+        "expense",
+        "profit",
+        "sales",
+        "cost",
+        "income",
+        "loss",
+        "quantity",
+        "price",
+        "amount",
+        "total",
+        "bikri",
+        "kharcha",
+        "munafa",
+        "aukhat",
+        "sale",
+        "bechne",
     }
 
     # Words indicating the whole sheet should be used.
     WHOLE_SHEET_WORDS = {"sabka", "sab", "sabhi", "all", "everything", "poora", "puri"}
+
+    # Strong write-intent markers. When one of these appears in a command but
+    # no destination cell/column could be resolved, the command would silently
+    # drop the requested write, so we reject it instead.
+    WRITE_INTENT_MARKERS = (
+        "daal do",
+        "dal do",
+        "daalo",
+        "daaliye",
+        "likho",
+        "write",
+        "place",
+    )
+
+    # Hindi particles that can follow "Column" without naming a column
+    # (e.g. "column ka total karo" -> "column of the data, total it").
+    HINDI_PARTICLES = {"ka", "ki", "ke", "ko", "se", "me", "mein", "na"}
+
+    def __init__(self, headers=None):
+        """Initialize the parser.
+
+        ``headers`` optionally lists the current workbook's column headers
+        (case-insensitive) so data operations like chart/sort/filter can use
+        arbitrary column names without relying on the built-in vocabulary.
+        """
+        self.headers = set()
+        if headers:
+            self.set_headers(headers)
+
+    def set_headers(self, headers):
+        """Replace the known workbook column headers."""
+        self.headers = set()
+        for header in headers or []:
+            if header:
+                self.headers.add(header.strip().lower())
 
     def parse(self, command):
         """Parse a natural language command into a structured instruction."""
@@ -120,8 +177,7 @@ class CommandParser:
                     agg = op
                     break
             if agg is not None:
-                op = {"SUM": "SUMIF", "COUNT": "COUNTIF",
-                      "AVERAGE": "AVERAGEIF"}[agg]
+                op = {"SUM": "SUMIF", "COUNT": "COUNTIF", "AVERAGE": "AVERAGEIF"}[agg]
                 return self._parse_conditional(command, op)
 
         # Check for a cell reference in the form like B2
@@ -150,42 +206,68 @@ class CommandParser:
             )
 
         # Conditional calculations: "jahan"/"where" clause with an aggregate
-        if operation in ("SUM", "AVERAGE", "COUNT", "SUMIF", "COUNTIF",
-                         "AVERAGEIF"):
-            if operation in ("SUMIF", "COUNTIF", "AVERAGEIF") or "jahan" in command \
-                    or "where" in command:
+        if operation in ("SUM", "AVERAGE", "COUNT", "SUMIF", "COUNTIF", "AVERAGEIF"):
+            if (
+                operation in ("SUMIF", "COUNTIF", "AVERAGEIF")
+                or "jahan" in command
+                or "where" in command
+            ):
                 return self._parse_conditional(command, operation)
 
         # Whole-sheet operations: "Sabka sum kar do"
         if operation in ("SUM", "AVERAGE", "MIN", "MAX", "COUNT", "PERCENTAGE"):
             if any(w in command for w in self.WHOLE_SHEET_WORDS) and not cells:
                 destination = self._find_destination(command)
+                self._reject_unresolved_write(command, destination)
                 return {
                     "operation": operation,
                     "whole_sheet": True,
                     "destination": destination,
                 }
 
-            # Named single column: "Sales ka total karo" or with a destination cell
-            if named and not column_matches and not bare_columns:
-                destination = self._find_destination(command)
-                return {
-                    "operation": operation,
-                    "named_source": named[0],
-                    "destination": destination,
-                }
+            # Named single column: "Sales ka total karo" or with a destination
+            # cell. Falls back to actual workbook headers so arbitrary column
+            # names (Salary, Bonus, ...) work for aggregates and percentages
+            # without being part of the built-in vocabulary.
+            if not column_matches and not bare_columns:
+                # Multi-letter column refs ("Column XYZ") are not real columns
+                # unless this workbook actually has them; reject with a clear
+                # message instead of guessing at a keyword like 'total'.
+                multi = re.match(r"column\s+([a-z]{2,})\b", command)
+                if multi and multi.group(1) not in self.HINDI_PARTICLES:
+                    raise ParserError(
+                        f"I couldn't find Column {multi.group(1).upper()} in this sheet."
+                    )
+                source = (
+                    named[0] if named else (None if cells else self._find_header_operand(command))
+                )
+                if source:
+                    destination = self._find_destination(command)
+                    self._reject_unresolved_write(command, destination)
+                    return {
+                        "operation": operation,
+                        "named_source": source,
+                        "destination": destination,
+                    }
 
         # Data operations
-        if operation in ("SORT", "DEDUPE", "FILTER", "FIND_EMPTY",
-                         "CHART", "ANALYZE",
-                         "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
-                         "DETECT_INVALID"):
-            return self._parse_data_operation(command, operation, cells,
-                                              named, column_matches, numbers)
+        if operation in (
+            "SORT",
+            "DEDUPE",
+            "FILTER",
+            "FIND_EMPTY",
+            "CHART",
+            "ANALYZE",
+            "STANDARDIZE_DATES",
+            "STANDARDIZE_NAMES",
+            "DETECT_INVALID",
+        ):
+            return self._parse_data_operation(
+                command, operation, cells, named, column_matches, numbers
+            )
 
         # Binary operations
-        if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
-                         "DIFFERENCE", "GROWTH"):
+        if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "DIFFERENCE", "GROWTH"):
             return self._parse_binary(command, operation, cells, numbers, named)
 
         # Column-based calculations (SUM/AVERAGE/MIN/MAX/COUNT on a column)
@@ -198,6 +280,7 @@ class CommandParser:
 
         if column:
             destination = self._find_destination(command)
+            self._reject_unresolved_write(command, destination)
             return {
                 "operation": operation,
                 "source": column,
@@ -249,6 +332,18 @@ class CommandParser:
                 found.append(token)
         return found
 
+    def _find_header_operand(self, command):
+        """Return the first command token that matches a known workbook header.
+
+        Enables aggregates and percentages to reference columns by their actual
+        header names (e.g. 'Bonus ka percentage karo') even when they are not
+        part of the built-in ``NAMED_COLUMNS`` vocabulary.
+        """
+        for token in command.split():
+            if token in self.headers:
+                return token
+        return None
+
     def _find_destination(self, command):
         """Find the destination cell in the command (e.g., D21).
         A cell is only treated as a destination if it follows or is followed
@@ -277,6 +372,8 @@ class CommandParser:
           - growth:         "February ki sales January se kitni badhi"
         """
         destination = self._find_destination(command)
+        dest_col = self._find_column_destination(command)
+        self._reject_unresolved_write(command, destination, dest_col)
 
         # Month growth pattern: "February ki sales January se kitni badhi"
         if operation == "GROWTH":
@@ -315,8 +412,7 @@ class CommandParser:
 
             if len(inputs) < 2:
                 raise ParserError(
-                    "I need two values for this operation, "
-                    "like 'B2 + C2' or 'B2 + 100'."
+                    "I need two values for this operation, like 'B2 + C2' or 'B2 + 100'."
                 )
 
             return {
@@ -334,9 +430,7 @@ class CommandParser:
             if len(named_inputs) >= 3:
                 named_output = named_inputs[-1]
                 named_inputs = named_inputs[:-1]
-            elif len(named_inputs) == 2 and operation in (
-                "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"
-            ):
+            elif len(named_inputs) == 2 and operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE"):
                 # Profit-like output: "Revenue minus expense karke profit nikalo"
                 # if 'profit/munafa/loss' is near the end, treat as output.
                 for out in ("profit", "munafa", "loss", "net", "result"):
@@ -356,7 +450,6 @@ class CommandParser:
         # Column-letter operands: "B aur C ko multiply karke D mein daal do"
         bare_cols = re.findall(r"\b([a-hj-z])\b", command)
         if bare_cols:
-            dest_col = self._find_column_destination(command)
             upper_cols = [c.upper() for c in bare_cols]
             if dest_col and dest_col.upper() in upper_cols:
                 upper_cols.remove(dest_col.upper())
@@ -370,9 +463,23 @@ class CommandParser:
                 }
 
         raise ParserError(
-            "I need two values for this operation, like 'B2 + C2' "
-            "or 'Revenue minus Expense'."
+            "I need two values for this operation, like 'B2 + C2' or 'Revenue minus Expense'."
         )
+
+    def _reject_unresolved_write(self, command, destination, dest_col=None):
+        """Raise when a command asks to write somewhere but no destination
+        cell/column could be found, so the write is never silently dropped."""
+        if not destination and not dest_col and self._has_write_intent(command):
+            raise ParserError(
+                "I couldn't make sense of the destination. Please use a cell "
+                "like 'D21' or a column letter, for example "
+                "'Revenue ka total karo aur D21 mein daal do'."
+            )
+
+    @staticmethod
+    def _has_write_intent(command):
+        """True when the command uses a strong write marker such as 'daal do'."""
+        return any(marker in command for marker in CommandParser.WRITE_INTENT_MARKERS)
 
     def _find_column_destination(self, command):
         """Find a destination column letter, e.g. 'D' in 'D mein daal do'."""
@@ -385,11 +492,9 @@ class CommandParser:
                 return match.group(1).upper()
         return None
 
-    def _parse_data_operation(self, command, operation, cells, named,
-                              column_matches, numbers):
+    def _parse_data_operation(self, command, operation, cells, named, column_matches, numbers):
         """Parse data operations (sort/dedupe/filter/find-empty/chart/analyze)."""
         destination = self._find_destination(command)
-        dest_col = self._find_column_destination(command)
 
         # Determine the target column and value
         column = None
@@ -402,6 +507,15 @@ class CommandParser:
             if bare:
                 column = bare[0].upper()
 
+        # Fall back to actual workbook headers so arbitrary column names
+        # (Salary, Orders, ...) work for data operations without needing to
+        # be part of the built-in NAMED_COLUMNS vocabulary.
+        if column is None and self.headers:
+            for token in command.split():
+                if token in self.headers:
+                    column = token
+                    break
+
         value = None
         operator = None
 
@@ -411,14 +525,21 @@ class CommandParser:
             if condition:
                 column, operator, value = condition
 
-        if operation == "ANALYZE":
-            return {"operation": "ANALYZE",
-                    "column": column,
-                    "whole_sheet": column is None}
+        descending = self._has_descending(command) if operation == "SORT" else False
 
-        if operation in ("SORT", "DEDUPE", "FIND_EMPTY", "FILTER", "CHART",
-                         "STANDARDIZE_DATES", "STANDARDIZE_NAMES",
-                         "DETECT_INVALID"):
+        if operation == "ANALYZE":
+            return {"operation": "ANALYZE", "column": column, "whole_sheet": column is None}
+
+        if operation in (
+            "SORT",
+            "DEDUPE",
+            "FIND_EMPTY",
+            "FILTER",
+            "CHART",
+            "STANDARDIZE_DATES",
+            "STANDARDIZE_NAMES",
+            "DETECT_INVALID",
+        ):
             if operation == "FILTER" and operator is None:
                 raise ParserError(
                     "I couldn't find a filter condition. Try something like "
@@ -436,10 +557,16 @@ class CommandParser:
                 "value": value,
                 "operator": operator,
                 "destination": destination,
+                "descending": descending,
                 "line_chart": "line" in command if operation == "CHART" else False,
             }
 
         raise ParserError(f"I couldn't understand the {operation} command.")
+
+    @staticmethod
+    def _has_descending(command):
+        """True when a sort command asks for descending/reverse order."""
+        return any(token in ("descending", "desc", "reverse", "ulta") for token in command.split())
 
     def _parse_conditional(self, command, operation):
         """Parse a command with a 'jahan'/where clause into a conditional
@@ -451,8 +578,9 @@ class CommandParser:
           - "Count karo jahan B 100 se zyada"
           - "B ka sum karo jahan A Pen hai aur C 50 se kam"
         """
-        operation = {"SUM": "SUMIF", "COUNT": "COUNTIF",
-                     "AVERAGE": "AVERAGEIF"}.get(operation, operation)
+        operation = {"SUM": "SUMIF", "COUNT": "COUNTIF", "AVERAGE": "AVERAGEIF"}.get(
+            operation, operation
+        )
         destination = self._find_destination(command)
         target_col = None
 
@@ -460,8 +588,8 @@ class CommandParser:
         tail = command
         m = re.search(r"\b(jahan|where)\b", command)
         if m:
-            head = command[:m.start()]
-            tail = command[m.end():]
+            head = command[: m.start()]
+            tail = command[m.end() :]
 
         # The target column comes from the head of the command.
         col_match = re.search(r"\bcolumn\s+([a-z])\b", head)

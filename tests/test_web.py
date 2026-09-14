@@ -1,4 +1,5 @@
 import io
+
 import openpyxl
 import pytest
 
@@ -54,14 +55,14 @@ class TestWebAPI:
 
         res = api_client.post(
             "/api/command",
-            json={"command": "Column B ka total karo aur A2 mein daal do",
-                  "allow_overwrite": True},
+            json={"command": "Column B ka total karo aur A2 mein daal do", "allow_overwrite": True},
         )
         data = res.get_json()
         assert data["success"] is True
 
     def test_command_without_workbook(self, tmp_path):
         from backend.api.app import create_app
+
         app = create_app()
         app.config["TESTING"] = True
         client = app.test_client()

@@ -19,7 +19,11 @@ class VoiceListener:
         the optional dependency installed."""
         if self._recognizer is None:
             try:
-                import speech_recognition as sr
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    import speech_recognition as sr
             except ImportError as e:
                 raise ImportError(
                     "The 'SpeechRecognition' package is required for voice "
@@ -37,15 +41,14 @@ class VoiceListener:
         recognizer = self._get_recognizer()
         try:
             import speech_recognition as sr
+
             with sr.Microphone() as source:
                 recognizer.adjust_for_ambient_noise(source, duration=0.3)
                 audio = recognizer.listen(
                     source, timeout=timeout, phrase_time_limit=phrase_time_limit
                 )
         except Exception as e:
-            raise VoiceError(
-                f"Couldn't access the microphone: {e}"
-            ) from e
+            raise VoiceError(f"Couldn't access the microphone: {e}") from e
 
         try:
             if self.engine == "google":
@@ -53,9 +56,9 @@ class VoiceListener:
             else:
                 text = recognizer.recognize_sphinx(audio)
         except sr.UnknownValueError:
-            raise VoiceError("I couldn't understand what you said.")
+            raise VoiceError("I couldn't understand what you said.") from None
         except sr.RequestError as e:
-            raise VoiceError(f"Speech service error: {e}")
+            raise VoiceError(f"Speech service error: {e}") from e
 
         return text.strip().lower()
 
