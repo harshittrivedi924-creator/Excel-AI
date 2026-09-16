@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excel AI Copilot</title>
+  <link rel="stylesheet" href="taskpane.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark">Σ</div>
+      <div>
+        <h1>Excel AI Copilot</h1>
+        <p class="tagline">Ask me to work with your spreadsheet</p>
+      </div>
+    </div>
+    <span class="backend-status" id="backendStatus" title="Backend connection status">checking…</span>
+  </header>
+
+  <div class="context-bar" id="contextBar">
+    <div class="context-line">
+      <label>Sheet</label>
+      <span id="ctxSheet">…</span>
+    </div>
+    <div class="context-line">
+      <label>Selection</label>
+      <span id="ctxSelection">—</span>
+    </div>
+  </div>
+
+  <main class="chat">
+    <div class="messages" id="messages"></div>
+    <div class="typing" id="typing" hidden>
+      <span class="dot" id="dotA"></span>
+      <span class="dot" id="dotB"></span>
+      <span class="dot" id="dotC"></span>
+    </div>
+  </main>
+
+  <section class="examples">
+    <details open>
+      <summary>Try these commands</summary>
+      <ul id="examplesList">
+        <li>Revenue ka total karo</li>
+        <li>Revenue ka average nikalo</li>
+        <li>Revenue ka maximum batao</li>
+        <li>Revenue ka percentage karo</li>
+        <li>Revenue minus Expense karke Profit nikalo</li>
+        <li>Column B ka total karo aur B8 mein daal do</li>
+        <li>inko total karo <span class="hint">(uses your selection)</span></li>
+        <li>Sales ka chart bana do</li>
+      </ul>
+    </details>
+  </section>
+
+  <form class="input-row" id="commandForm">
+    <input
+      id="commandInput"
+      type="text"
+      placeholder='Try: "Revenue ka total karo"'
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <button type="submit" id="sendBtn" disabled>
+      <span class="btn-send">Send</span>
+      <span class="btn-spinner" aria-hidden="true"></span>
+    </button>
+  </form>
+
+  <footer class="app-footer">Excel AI Copilot v1.0 · Add-in</footer>
+
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+</body>
+</html>
