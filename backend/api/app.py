@@ -1,7 +1,9 @@
 import os
 
 from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 
+from backend.api.addin_routes import addin_bp
 from backend.copilot import ExcelCopilot
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
@@ -19,6 +21,23 @@ def create_app(initial_filepath=None):
     if initial_filepath and os.path.exists(initial_filepath):
         copilot.load_workbook(initial_filepath)
         active_file["path"] = os.path.abspath(initial_filepath)
+
+    # Excel Add-in API (additive). The task pane is hosted by Office.js on a
+    # different origin (e.g. https://localhost:3000 during local development)
+    # and calls these endpoints directly, so CORS is required. It is scoped
+    # to the Add-in blueprint only -- the existing `/api/*` endpoints keep
+    # their same-origin behavior unchanged.
+    allowed_origins = os.environ.get("EXCEL_ADDIN_ALLOWED_ORIGINS", "https://localhost:3000")
+    origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+    if not getattr(addin_bp, "_cors_configured", False):
+        CORS(
+            addin_bp,
+            origins=origins,
+            methods=["GET", "POST", "OPTIONS"],
+            supports_credentials=False,
+        )
+        addin_bp._cors_configured = True
+    app.register_blueprint(addin_bp, url_prefix="/api/excel")
 
     @app.route("/health")
     def health():
