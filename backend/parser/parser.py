@@ -238,9 +238,11 @@ class CommandParser:
                     raise ParserError(
                         f"I couldn't find Column {multi.group(1).upper()} in this sheet."
                     )
-                source = (
-                    named[0] if named else (None if cells else self._find_header_operand(command))
+                header_operand = self._find_header_operand(command)
+                named_operand = (
+                    named[0] if named and named[0] not in self.OPERATION_KEYWORDS else None
                 )
+                source = header_operand or named_operand
                 if source:
                     destination = self._find_destination(command)
                     self._reject_unresolved_write(command, destination)
@@ -265,6 +267,24 @@ class CommandParser:
             return self._parse_data_operation(
                 command, operation, cells, named, column_matches, numbers
             )
+
+        # Column-wise addition into a destination column:
+        #   "a or b ka sum kar ke d mein daal do"  ->  ADD(a, b) into column D
+        # "sum"/"add" with two column headers plus a destination column means
+        # the user wants the two columns summed element-wise into the output.
+        if operation in ("SUM", "ADD") and not cells and not named:
+            dest_col = self._find_column_destination(command)
+            if dest_col:
+                header_operands = [token for token in command.split() if token in self.headers]
+                inputs = [op for op in header_operands if op != dest_col.lower()]
+                if len(inputs) >= 2:
+                    return {
+                        "operation": "ADD",
+                        "named_inputs": inputs[:2],
+                        "named_output": dest_col.lower(),
+                        "output": None,
+                        "destination": None,
+                    }
 
         # Binary operations
         if operation in ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "DIFFERENCE", "GROWTH"):
@@ -301,6 +321,10 @@ class CommandParser:
         """Lowercase and strip punctuation/extra whitespace."""
         command = command.strip().lower()
         command = re.sub(r"[?!.,]+", "", command)
+        command = re.sub(r"\s+", " ", command)
+        # Common Hinglish typo "aor" means "and" ("a" + "or" fused together)
+        # and is used to join two column operands: "aor b ka sum ...".
+        command = re.sub(r"\baor\b", "a aur", command)
         return re.sub(r"\s+", " ", command)
 
     def _detect_operation(self, command):

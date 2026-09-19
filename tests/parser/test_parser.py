@@ -189,3 +189,63 @@ class TestWorkbookHeaderParsing:
         result = parser.parse("Column C sort karo")
         assert result["operation"] == "SORT"
         assert result["column"] == "C"
+
+    def test_aggregate_uses_workbook_header_over_operation_keyword(self):
+        parser = CommandParser(headers=["month", "salary", "bonus"])
+        result = parser.parse("Salary ka total karo")
+        assert result["operation"] == "SUM"
+        assert result["named_source"] == "salary"
+
+    def test_aggregate_workbook_header_with_destination(self):
+        parser = CommandParser(headers=["month", "salary", "bonus"])
+        result = parser.parse("Salary ka total karo aur C8 mein daal do")
+        assert result["operation"] == "SUM"
+        assert result["named_source"] == "salary"
+        assert result["destination"] == "C8"
+
+    def test_aggregate_keeps_builtin_named_column(self):
+        parser = CommandParser(headers=["month", "expense"])
+        result = parser.parse("Sales ka total karo")
+        assert result["operation"] == "SUM"
+        assert result["named_source"] == "sales"
+
+    def test_sum_two_headers_into_destination_column(self):
+        parser = CommandParser(headers=["a", "b", "d"])
+        result = parser.parse("a aur b ka sum kar ke d mein daal do")
+        assert result["operation"] == "ADD"
+        assert result["named_inputs"] == ["a", "b"]
+        assert result["named_output"] == "d"
+
+    def test_sum_two_headers_into_destination_column_or_connector(self):
+        parser = CommandParser(headers=["a", "b", "d"])
+        result = parser.parse("a or b ka sum kar ke d mein daal do")
+        assert result["operation"] == "ADD"
+        assert result["named_inputs"] == ["a", "b"]
+        assert result["named_output"] == "d"
+
+    def test_aor_typo_normalized_to_connector(self):
+        parser = CommandParser(headers=["a", "b", "d"])
+        result = parser.parse("aor b ka sum kar ke d mein daal do")
+        assert result["operation"] == "ADD"
+        assert result["named_inputs"] == ["a", "b"]
+        assert result["named_output"] == "d"
+
+    def test_add_two_headers_into_destination_column(self):
+        parser = CommandParser(headers=["a", "b", "d"])
+        result = parser.parse("a aur b add kar ke d mein daal do")
+        assert result["operation"] == "ADD"
+        assert result["named_inputs"] == ["a", "b"]
+        assert result["named_output"] == "d"
+
+    def test_single_header_sum_stays_aggregate(self):
+        parser = CommandParser(headers=["a", "b", "d"])
+        result = parser.parse("b ka total karo")
+        assert result["operation"] == "SUM"
+        assert result["column"] == "B"
+
+    def test_cell_destination_aggregate_is_not_column_add(self):
+        parser = CommandParser(headers=["month", "salary", "bonus"])
+        result = parser.parse("Salary ka total karo aur C8 mein daal do")
+        assert result["operation"] == "SUM"
+        assert result["named_source"] == "salary"
+        assert result["destination"] == "C8"

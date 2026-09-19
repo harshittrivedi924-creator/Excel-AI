@@ -258,3 +258,89 @@ def test_existing_api_unaffected(client):
     cmd = client.post("/api/command", json={"command": "sum karo"})
     assert cmd.status_code == 400
     assert cmd.headers.get("Access-Control-Allow-Origin") is None
+
+
+# ---------------------------------------------------------------------- #
+# Real-worksheet snapshot (Sheet1, used range A2:C7):
+#   A2=a  B2=b  C2=d
+#   A3=2555  B3=4544
+#   A4=511   B4=3535
+#   A5=214   B5=355
+#   A6=3212135  B6=546
+#   A7=35    B7=3545
+# ---------------------------------------------------------------------- #
+
+
+def user_sheet_payload(command, **overrides):
+    payload = {
+        "command": command,
+        "sheet_name": "Sheet1",
+        "origin": {"row": 2, "column": 1},
+        "headers": ["a", "b", "d"],
+        "rows": [
+            [2555, 4544],
+            [511, 3535],
+            [214, 355],
+            [3212135, 546],
+            [35, 3545],
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_b_column_total_from_real_worksheet(client):
+    res = client.post("/api/excel/command", json=user_sheet_payload("b ka total karo"))
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["operation"] == "SUM"
+    assert data["result"] == 12525
+    assert data["message"]
+    assert data["writes"] == {"cells": [], "sheets": {}, "charts": []}
+
+
+def test_add_two_columns_into_d_column(client):
+    res = client.post(
+        "/api/excel/command",
+        json=user_sheet_payload("a aur b ka sum kar ke d mein daal do"),
+    )
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["operation"] == "ADD"
+    cells = data["writes"]["cells"]
+    expected = [{"row": r, "column": 4, "formula": f"=A{r}+B{r}"} for r in range(3, 8)]
+    assert [c for c in cells if c.get("formula", "").startswith("=A")] == expected
+
+
+def test_add_two_columns_into_d_column_aor_typo(client):
+    res = client.post(
+        "/api/excel/command",
+        json=user_sheet_payload("aor b ka sum kar ke d mein daal do"),
+    )
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["operation"] == "ADD"
+    formulas = sorted(c["formula"] for c in data["writes"]["cells"])
+    assert formulas == [f"=A{r}+B{r}" for r in range(3, 8)]
+
+
+def test_selection_sum_from_real_worksheet(client):
+    payload = user_sheet_payload(
+        "inka total karo",
+        selection={
+            "address": "Sheet1!A3:A7",
+            "values": [[2555], [511], [214], [3212135], [35]],
+            "row": 3,
+            "column": 1,
+            "row_count": 5,
+            "column_count": 1,
+        },
+    )
+    res = client.post("/api/excel/command", json=payload)
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["operation"] == "SUM"
+    assert data["result"] == 3215450
+    assert data["selection_used"] is True
+    assert data["selection_auto_write"] == {"row": 8, "column": 1, "value": 3215450}

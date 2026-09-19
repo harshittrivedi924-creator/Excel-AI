@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "build": "webpack --mode development",
+    "test": "node --test",
     "start": "office-addin-debugging start manifest.xml",
     "stop": "office-addin-debugging stop manifest.xml",
     "dev-server": "webpack serve --mode development",

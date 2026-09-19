@@ -5,6 +5,8 @@
  * applies the returned writes back to the open workbook.
  */
 
+import { buildSnapshot, isEmptyValues } from "./snapshot.mjs";
+
 /* ---------------------------------------------------------------------- */
 /* Configuration                                                          */
 /* ---------------------------------------------------------------------- */
@@ -26,6 +28,7 @@ const state = {
   busy: false,
   sheetName: null,
   used: null, // { address, values, rows, cols, originRow, originCol }
+  usedSource: null, // worksheet | region | selection
   selection: null, // { address, values, row, column, rowCount, columnCount }
   truncated: false,
   health: "unknown", // unknown | online | offline
@@ -97,59 +100,130 @@ async function checkBackend() {
 /* ---------------------------------------------------------------------- */
 
 async function refreshContext() {
+  let info;
   await Excel.run(async (context) => {
     context.workbook.worksheets.load("items/name");
     const ws = context.workbook.worksheets.getActiveWorksheet();
     ws.load("name");
 
+    // ---- used range snapshot -----------------------------------------
+    // Strategy (each step is a cross-check against real cell contents):
+    //   1. getUsedRangeOrNullObject() when it genuinely contains data.
+    //   2. a fixed A1-window scan, when the used range reports "empty" so we
+    //      never trust a null-object result blindly.
+    //   3. finally, the user's live selection when both reads came up empty
+    //      but the selection really has content.
     const usedRange = ws.getUsedRangeOrNullObject();
-    usedRange.load(["address", "values", "rowCount", "columnCount"]);
+    usedRange.load([
+      "address",
+      "values",
+      "rowCount",
+      "columnCount",
+      "isNullObject",
+      "rowIndex",
+      "columnIndex",
+    ]);
 
     const selection = context.workbook.getSelectedRange();
-    selection.load(["address", "values", "rowCount", "columnCount"]);
+    selection.load([
+      "address",
+      "values",
+      "rowCount",
+      "columnCount",
+      "rowIndex",
+      "columnIndex",
+    ]);
 
     await context.sync();
 
-    state.sheetName = ws.name;
+    let used = usedRangeToSnapshot(usedRange);
+    let usedSource = used ? "worksheet" : null;
+    let truncated = Boolean(used && used.truncated);
 
-    // ---- used range snapshot -----------------------------------------
-    if (usedRange.isNullObject || !usedRange.values || !usedRange.values.length) {
-      state.used = null;
-    } else {
-      const parsed = parseAddress(usedRange.address);
-      const truncatedRows =
-        usedRange.values.length > MAX_ROWS || usedRange.values[0].length > MAX_COLS;
-      const values = usedRange.values
-        .slice(0, MAX_ROWS)
-        .map((row) => row.slice(0, MAX_COLS));
-      state.used = {
-        address: usedRange.address,
-        values,
-        rows: values.length,
-        cols: values[0] ? values[0].length : 0,
-        originRow: parsed ? parsed.row : 1,
-        originCol: parsed ? parsed.col : 1,
-      };
-      state.truncated = truncatedRows || values.length === 0;
+    // Fallback #1: the used range appeared to be null/empty. Scan an
+    // absolute window of the sheet so we read the real cells rather than a
+    // possibly-wrong null object.
+    if (!used) {
+      const region = ws.getRangeByIndexes(0, 0, MAX_ROWS, MAX_COLS);
+      region.load("values");
+      await context.sync();
+      used = buildSnapshot(region.values, {
+        baseRow: 1,
+        baseCol: 1,
+        maxRows: MAX_ROWS,
+        maxCols: MAX_COLS,
+      });
+      usedSource = used ? "region" : "empty";
+      truncated = Boolean(used && used.truncated);
     }
 
-    // ---- current selection --------------------------------------------
-    if (!selection.values || !selection.values.length) {
-      state.selection = null;
-    } else {
-      const selParsed = parseAddress(selection.address.split(",")[0]);
-      state.selection = {
-        address: selection.address,
-        values: selection.values.slice(0, MAX_ROWS).map((r) => r.slice(0, MAX_COLS)),
-        row: selParsed ? selParsed.row : 1,
-        column: selParsed ? selParsed.col : 1,
-        rowCount: selection.rowCount,
-        columnCount: selection.columnCount,
+    const sel = selectionToState(selection);
+
+    // Fallback #2: still no worksheet data, but the live selection has
+    // content. Operate on the selected cells instead.
+    if (!used && sel && !isEmptyValues(sel.values)) {
+      used = {
+        values: sel.values,
+        rows: sel.rowCount || sel.values.length,
+        cols: sel.columnCount || (sel.values[0] ? sel.values[0].length : 0),
+        originRow: sel.row,
+        originCol: sel.column,
+        truncated: truncated || sel.rowCount > MAX_ROWS || sel.columnCount > MAX_COLS,
       };
+      usedSource = "selection";
     }
 
-    renderContext();
+    info = {
+      sheetName: ws.name,
+      used,
+      usedSource,
+      truncated,
+      selection: sel,
+    };
   });
+
+  state.sheetName = info.sheetName;
+  state.used = info.used;
+  state.usedSource = info.usedSource;
+  state.truncated = info.truncated;
+  state.selection = info.selection;
+
+  renderContext();
+  return info;
+}
+
+/**
+ * Extract a snapshot from a loaded used-range proxy. Returns null when the
+ * range is a null object or contains no actual data.
+ */
+function usedRangeToSnapshot(usedRange) {
+  if (!usedRange || usedRange.isNullObject) return null;
+  if (!Array.isArray(usedRange.values)) return null;
+  return buildSnapshot(usedRange.values, {
+    baseRow: (usedRange.rowIndex === undefined ? 0 : usedRange.rowIndex) + 1,
+    baseCol: (usedRange.columnIndex === undefined ? 0 : usedRange.columnIndex) + 1,
+    maxRows: MAX_ROWS,
+    maxCols: MAX_COLS,
+  });
+}
+
+function selectionToState(selection) {
+  if (!selection || !Array.isArray(selection.values) || !selection.values.length) {
+    return null;
+  }
+  const parsed = parseAddress(
+    String(selection.address || "").split(",")[0].replace(/^.*!/, "")
+  );
+  return {
+    address: selection.address,
+    values: selection.values.slice(0, MAX_ROWS).map((r) => r.slice(0, MAX_COLS)),
+    row: parsed ? parsed.row : (selection.rowIndex === undefined ? 0 : selection.rowIndex) + 1,
+    column: parsed
+      ? parsed.col
+      : (selection.columnIndex === undefined ? 0 : selection.columnIndex) + 1,
+    rowCount: selection.rowCount,
+    columnCount: selection.columnCount,
+  };
 }
 
 function renderContext() {
@@ -248,8 +322,11 @@ async function handleSubmit(cmd) {
   inputEl.placeholder = 'Try: "Revenue ka total karo"';
 
   try {
-    if (!state.used || !state.used.values.length) {
-      showError("The active worksheet is empty. Add some data first.");
+    if (!state.used || !state.used.values || !state.used.values.length) {
+      showError(
+        "The active worksheet is empty — Excel reported no data in the " +
+          "used range, the sheet scan, or your selection. Add some data first."
+      );
       return;
     }
     if (state.truncated) {
