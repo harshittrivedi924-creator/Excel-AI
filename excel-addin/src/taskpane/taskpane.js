@@ -322,6 +322,15 @@ async function handleSubmit(cmd) {
   inputEl.placeholder = 'Try: "Revenue ka total karo"';
 
   try {
+    // LIVE RE-READ: the snapshot captured at pane startup (or after the last
+    // command) can be stale — the worksheet may have been empty when the pane
+    // loaded, or the user may have edited cells since. Every command must run
+    // against the CURRENT worksheet, so refresh the context before the
+    // emptiness check. This prevents a pane that loaded on an empty sheet
+    // from permanently rejecting commands with "worksheet is empty" even
+    // after the user adds data.
+    await refreshContext();
+
     if (!state.used || !state.used.values || !state.used.values.length) {
       showError(
         "The active worksheet is empty — Excel reported no data in the " +
