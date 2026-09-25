@@ -359,8 +359,13 @@ class ExcelHandler:
                 value = value.lower()
 
         matches = []
+        # Count rows that hold data in the filtered column, so trailing padding
+        # in the used range is not reported as part of the dataset.
+        total = 0
         for row in data:
             cell_value = row[col_index - 1] if col_index <= len(row) else None
+            if cell_value is not None and cell_value != "":
+                total += 1
 
             def coerce(v):
                 if isinstance(v, str):
@@ -392,7 +397,7 @@ class ExcelHandler:
             del self.workbook["Filtered"]
         filtered = self.workbook.create_sheet("Filtered")
         self._write_rows(filtered, [header] + matches)
-        return len(matches), len(data)
+        return len(matches), total
 
     def find_empty_cells(self, column=None, sheet_name=None):
         """Find empty cells in the used range (optionally a single column).
@@ -608,7 +613,16 @@ class ExcelHandler:
             col_index = column
         col_letter = get_column_letter(col_index)
 
-        max_row = sheet.max_row
+        # Use the last row that actually has data in the charted column, so
+        # trailing padding in the used range does not add empty categories.
+        max_row = max(
+            (
+                r
+                for r in range(2, sheet.max_row + 1)
+                if sheet.cell(row=r, column=col_index).value not in (None, "")
+            ),
+            default=0,
+        )
         if max_row < 2:
             raise ValueError("Not enough data to chart.")
 

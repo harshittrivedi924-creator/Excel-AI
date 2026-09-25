@@ -17,6 +17,18 @@ import openpyxl
 from backend.excel.handler import ExcelHandler
 
 
+def is_blank(value):
+    """True when a snapshot value carries no cell content.
+
+    Office.js returns ``null`` for empty cells, but the WebView2 runtime
+    hands some builds back an empty string instead. Both mean "no data",
+    so they must never be materialised as cell content: a blank cell that
+    looks occupied would inflate used ranges, count as data for
+    overwrite checks, and produce spurious writes.
+    """
+    return value is None or value == ""
+
+
 class MemoryExcelHandler(ExcelHandler):
     """ExcelHandler backed by an in-memory workbook populated from a
     header/data snapshot captured from the live workbook via Office.js.
@@ -57,6 +69,6 @@ class MemoryExcelHandler(ExcelHandler):
         data_start = origin_row + (1 if headers else 0)
         for r, row in enumerate(rows or []):
             for c, value in enumerate(row):
-                if value is None:
+                if is_blank(value):
                     continue
                 ws.cell(row=data_start + r, column=origin_col + c, value=value)

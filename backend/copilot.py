@@ -334,6 +334,7 @@ class ExcelCopilot:
             raise ParserError("Please specify an output column, like 'profit calculate kar do'.")
 
         count = 0
+        self._validate_column_destination(out_col, start_row, end_row, sheet_name, allow_overwrite)
         for row in range(start_row, end_row + 1):
             if operation in self.BINARY_OPERATIONS:
                 formula = f"={in1}{row}{self.OP_SYMBOLS[operation]}{in2}{row}"
@@ -345,6 +346,20 @@ class ExcelCopilot:
         instruction["row_count"] = count
         instruction["out_col"] = out_col
         return count, None, count
+
+    def _validate_column_destination(
+        self, out_col, start_row, end_row, sheet_name, allow_overwrite
+    ):
+        """Guard a row-by-row column write before anything is written.
+
+        A single-cell check is not enough here: the write touches every cell
+        of the column range, so any occupied cell must raise the overwrite
+        prompt instead of being silently replaced.
+        """
+        if allow_overwrite:
+            return
+        for row in range(start_row, end_row + 1):
+            self.validator.validate_destination(f"{out_col}{row}", sheet_name, allow_overwrite)
 
     def _handle_percentage(self, instruction, sheet_name, allow_overwrite):
         """Handle percentage operations.
@@ -391,7 +406,9 @@ class ExcelCopilot:
         )
         if out_col:
             out_col = out_col[:1]
-            self.validator.validate_destination(f"{out_col}{min_row}", sheet_name, allow_overwrite)
+            self._validate_column_destination(
+                out_col, min_row, max_row, sheet_name, allow_overwrite
+            )
             for row in range(min_row, max_row + 1):
                 formula = f"={column}{row}/{total}*100"
                 self.excel.write_formula(f"{out_col}{row}", formula, sheet_name)

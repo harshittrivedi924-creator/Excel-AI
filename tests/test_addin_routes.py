@@ -344,3 +344,118 @@ def test_selection_sum_from_real_worksheet(client):
     assert data["result"] == 3215450
     assert data["selection_used"] is True
     assert data["selection_auto_write"] == {"row": 8, "column": 1, "value": 3215450}
+
+
+# ---------------------------------------------------------------------- #
+# Real-Excel snapshot of the "Data" sheet (used range A1:D9):
+#   A1=a  B1=b  C1=c  D1=d
+#   A2:A6 / B2:B6 numbers, C2:C6 labels, D2:D8 empty, D9=42
+# Office.js reports the empty cells inside the used range as "" rather
+# than null, so blank padding is part of the real request payload.
+# ---------------------------------------------------------------------- #
+
+
+def blank_padded_payload(command, **overrides):
+    payload = {
+        "command": command,
+        "sheet_name": "Data",
+        "origin": {"row": 1, "column": 1},
+        "headers": ["a", "b", "c", "d"],
+        "rows": [
+            [10, 100, "row1", ""],
+            [20, 200, "row2", ""],
+            [30, 300, "row3", ""],
+            [40, 400, "row4", ""],
+            [50, 500, "row5", ""],
+            ["", "", "", ""],
+            ["", "", "", ""],
+            ["", "", "", 42],
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_blank_cells_are_not_treated_as_data(client):
+    res = client.post(
+        "/api/excel/command",
+        json=blank_padded_payload("aor b ka sum kar ke d mein daal do"),
+    )
+    data = res.get_json()
+    assert data["success"] is True
+    formulas = [c["formula"] for c in data["writes"]["cells"] if c.get("formula")]
+    # Only the rows holding data get a formula; the blank padding below the
+    # table must not extend the write range.
+    assert formulas == [f"=A{r}+B{r}" for r in range(2, 7)]
+    # D9 holds 42 and is outside the write range, so it stays untouched and
+    # blank cells are not reported as changes.
+    assert not [c for c in data["writes"]["cells"] if c.get("clear")]
+    assert not [c for c in data["writes"]["cells"] if c.get("row") == 9]
+
+
+def test_element_wise_write_asks_before_overwriting(client):
+    payload = blank_padded_payload(
+        "aor b ka sum kar ke d mein daal do",
+        rows=[
+            [10, 100, "row1", 5],
+            [20, 200, "row2", ""],
+            [30, 300, "row3", ""],
+            [40, 400, "row4", ""],
+            [50, 500, "row5", ""],
+        ],
+    )
+    data = client.post("/api/excel/command", json=payload).get_json()
+    assert data["success"] is False
+    assert data["overwrite_needed"] is True
+    assert "already contains data" in data["message"]
+    assert data["writes"]["cells"] == []
+
+    data = client.post("/api/excel/command", json=dict(payload, allow_overwrite=True)).get_json()
+    assert data["success"] is True
+    formulas = sorted(c["formula"] for c in data["writes"]["cells"] if c.get("formula"))
+    assert formulas == [f"=A{r}+B{r}" for r in range(2, 7)]
+
+
+def test_percentage_column_write_asks_before_overwriting(client):
+    payload = blank_padded_payload(
+        "b ka percentage D2 mein daalo",
+        rows=[
+            [10, 100, "row1", 5],
+            [20, 200, "row2", ""],
+            [30, 300, "row3", ""],
+        ],
+    )
+    data = client.post("/api/excel/command", json=payload).get_json()
+    assert data["success"] is False
+    assert data["overwrite_needed"] is True
+    assert data["writes"]["cells"] == []
+
+    data = client.post("/api/excel/command", json=dict(payload, allow_overwrite=True)).get_json()
+    assert data["success"] is True
+    assert [c["formula"] for c in data["writes"]["cells"] if c.get("formula")] == [
+        "=B2/600*100",
+        "=B3/600*100",
+        "=B4/600*100",
+    ]
+
+
+def test_padded_used_range_reports_actual_data_rows(client):
+    # Used range is A1:D9 because of D9=42, but column B only holds five data
+    # rows. Chart and filter must report/count the 5 data rows, not 8.
+    chart = client.post(
+        "/api/excel/command", json=blank_padded_payload("b ka chart bana do")
+    ).get_json()
+    assert chart["success"] is True
+    assert chart["writes"]["charts"][0]["source_range"] == "B1:B6"
+    assert "5 rows of data" in chart["message"]
+    assert "8 rows" not in chart["message"]
+
+    filtered = client.post(
+        "/api/excel/command",
+        json=blank_padded_payload("Filter data jahan b 200 se zyada"),
+    ).get_json()
+    assert filtered["success"] is True
+    assert filtered["result"]["matched"] == 3
+    assert filtered["result"]["total"] == 5
+    assert "3 of 5 rows" in filtered["message"]
+    assert "of 8" not in filtered["message"]

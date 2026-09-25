@@ -9,58 +9,68 @@
 <body>
   <header class="app-header">
     <div class="brand">
-      <div class="brand-mark">Σ</div>
-      <div>
+      <div class="brand-mark" aria-hidden="true">Σ</div>
+      <div class="brand-text">
         <h1>Excel AI Copilot</h1>
-        <p class="tagline">Ask me to work with your spreadsheet</p>
+        <p class="tagline">Your AI assistant for Excel</p>
       </div>
     </div>
-    <span class="backend-status" id="backendStatus" title="Backend connection status">checking…</span>
+    <div class="status-pills" aria-label="Connection status">
+      <span class="pill-status unknown" id="excelStatus" title="Excel connection status">Checking…</span>
+      <span class="pill-status unknown" id="backendStatus" title="Backend connection status">Checking…</span>
+    </div>
   </header>
 
   <div class="context-bar" id="contextBar">
-    <div class="context-line">
+    <span class="ctx-item">
       <label>Sheet</label>
-      <span id="ctxSheet">…</span>
-    </div>
-    <div class="context-line">
-      <label>Selection</label>
+      <span id="ctxSheet">—</span>
+    </span>
+    <span class="ctx-item">
+      <label>Selected</label>
       <span id="ctxSelection">—</span>
-    </div>
+    </span>
   </div>
 
   <main class="chat">
-    <div class="messages" id="messages"></div>
+    <div class="chat-topbar">
+      <span class="chat-title">Conversation</span>
+      <button type="button" id="clearChat" class="clear-btn" title="Clear this conversation">Clear chat</button>
+    </div>
+    <div class="messages" id="messages" aria-live="polite"></div>
     <div class="typing" id="typing" hidden>
       <span class="dot" id="dotA"></span>
       <span class="dot" id="dotB"></span>
       <span class="dot" id="dotC"></span>
+      <span class="typing-label" id="typingLabel">Working in Excel…</span>
     </div>
   </main>
 
-  <section class="examples">
-    <details open>
-      <summary>Try these commands</summary>
-      <ul id="examplesList">
-        <li>Revenue ka total karo</li>
-        <li>Revenue ka average nikalo</li>
-        <li>Revenue ka maximum batao</li>
-        <li>Revenue ka percentage karo</li>
-        <li>Revenue minus Expense karke Profit nikalo</li>
-        <li>Column B ka total karo aur B8 mein daal do</li>
-        <li>inko total karo <span class="hint">(uses your selection)</span></li>
-        <li>Sales ka chart bana do</li>
-      </ul>
-    </details>
+  <section class="quick" aria-label="Quick command suggestions">
+    <div class="quick-head">
+      <span>Quick commands</span>
+      <span class="quick-hint">tap to try</span>
+    </div>
+    <div class="chip-row" id="quickList">
+      <button type="button" class="chip" data-cmd="Revenue ka total karo">Revenue ka total</button>
+      <button type="button" class="chip" data-cmd="inka total karo">Total of this selection</button>
+      <button type="button" class="chip" data-cmd="inka average nikalo">Average of this selection</button>
+      <button type="button" class="chip" data-cmd="maximum batao">Find maximum</button>
+      <button type="button" class="chip" data-cmd="minimum batao">Find minimum</button>
+      <button type="button" class="chip" data-cmd="duplicate rows hatao">Remove duplicates</button>
+      <button type="button" class="chip" data-cmd="Sales ka chart bana do">Create a chart</button>
+      <button type="button" class="chip" data-cmd="Revenue minus Expense karke profit nikalo">Calculate profit</button>
+    </div>
   </section>
 
   <form class="input-row" id="commandForm">
     <input
       id="commandInput"
       type="text"
-      placeholder='Try: "Revenue ka total karo"'
+      placeholder='Ask: "Revenue ka total karo"'
       autocomplete="off"
       spellcheck="false"
+      aria-label="Command"
     />
     <button type="submit" id="sendBtn" disabled>
       <span class="btn-send">Send</span>
@@ -68,7 +78,7 @@
     </button>
   </form>
 
-  <footer class="app-footer">Excel AI Copilot v1.0 · Add-in</footer>
+  <footer class="app-footer">Excel AI Copilot · Microsoft Excel Add-in</footer>
 
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </body>

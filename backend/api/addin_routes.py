@@ -39,7 +39,7 @@ from openpyxl.utils import get_column_letter
 
 from backend.calculator.engine import CalculationEngine
 from backend.copilot import ExcelCopilot
-from backend.excel.memory_handler import MemoryExcelHandler
+from backend.excel.memory_handler import MemoryExcelHandler, is_blank
 from backend.parser.parser import CommandParser
 from backend.validator.validator import Validator
 
@@ -166,7 +166,7 @@ def _build_snapshot(headers, rows, origin_row, origin_col):
     data_start = origin_row + (1 if headers else 0)
     for r, row in enumerate(rows or []):
         for c, value in enumerate(row):
-            if value is None:
+            if is_blank(value):
                 continue
             snapshot[(data_start + r, origin_col + c)] = value
     return snapshot

@@ -6,6 +6,7 @@
  */
 
 import { buildSnapshot, isEmptyValues } from "./snapshot.mjs";
+import { groupThousands, humanizeSuccess, humanizeError } from "./format.mjs";
 
 /* ---------------------------------------------------------------------- */
 /* Configuration                                                          */
@@ -18,6 +19,12 @@ const API_BASE = `${BACKEND_URL}/api/excel`;
 // trimmed and the user is told the context is partial.
 const MAX_ROWS = 3000;
 const MAX_COLS = 100;
+
+// How long a backend round trip may take before we treat it as a timeout.
+const COMMAND_TIMEOUT_MS = 45000;
+
+// How often the pane re-checks backend availability.
+const HEALTH_INTERVAL_MS = 20000;
 
 /* ---------------------------------------------------------------------- */
 /* State                                                                  */
@@ -32,6 +39,8 @@ const state = {
   selection: null, // { address, values, row, column, rowCount, columnCount }
   truncated: false,
   health: "unknown", // unknown | online | offline
+  excelConnected: false,
+  history: [], // { role, text, ts } -- in-session conversation
 };
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +48,7 @@ const messagesEl = $("messages");
 const inputEl = $("commandInput");
 const sendBtn = $("sendBtn");
 const typingEl = $("typing");
+const typingLabelEl = $("typingLabel");
 
 /* ---------------------------------------------------------------------- */
 /* Office.js lifecycle                                                    */
@@ -50,14 +60,21 @@ Office.onReady((info) => {
     return;
   }
   state.ready = true;
+  state.excelConnected = true;
+  renderExcelStatus();
   sendBtn.disabled = false;
+  welcomeMessage();
+  startup();
+  setInterval(checkBackend, HEALTH_INTERVAL_MS);
+});
+
+function welcomeMessage() {
   addMessage(
     "bot",
     "Connected to Excel. Select some data and type a command like " +
-      '"Revenue ka total karo".'
+      '"Revenue ka total karo", or tap a quick command below.'
   );
-  startup();
-});
+}
 
 async function startup() {
   try {
@@ -72,8 +89,23 @@ async function startup() {
 /* Backend health                                                         */
 /* ---------------------------------------------------------------------- */
 
-async function checkBackend() {
+function renderExcelStatus() {
+  const el = $("excelStatus");
+  el.classList.remove("ok", "bad");
+  el.classList.add(state.excelConnected ? "ok" : "bad");
+  el.textContent = state.excelConnected ? "Connected to Excel" : "Excel unavailable";
+}
+
+function renderBackendStatus() {
   const el = $("backendStatus");
+  el.classList.remove("ok", "bad");
+  el.classList.add(state.health === "online" ? "ok" : "bad");
+  el.textContent = state.health === "online" ? "Backend online" : "Backend offline";
+}
+
+async function checkBackend() {
+  if (!state.ready) return;
+  const prev = state.health;
   try {
     const res = await fetch(`${API_BASE}/health`);
     if (!res.ok) throw new Error("health check failed");
@@ -82,9 +114,9 @@ async function checkBackend() {
   } catch {
     state.health = "offline";
   }
-  el.textContent = state.health === "online" ? "backend online" : "backend offline";
-  el.className = "backend-status " + state.health;
-  if (state.health !== "online") {
+  renderBackendStatus();
+
+  if (state.health === "offline" && prev !== "offline") {
     addMessage(
       "error",
       "Cannot reach the Excel AI Copilot backend at " +
@@ -92,6 +124,8 @@ async function checkBackend() {
         ".\nStart it with:\n\n  python main.py --serve --port 5000\n\n" +
         "then run a command again."
     );
+  } else if (state.health === "online" && prev === "offline") {
+    addMessage("bot", "Backend is back online.");
   }
 }
 
@@ -291,17 +325,25 @@ function buildPayload(cmd, allowOverwrite) {
 }
 
 async function postCommand(payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
   let res;
   try {
     res = await fetch(`${API_BASE}/command`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
   } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error("The backend took too long to respond. Please try again.");
+    }
     throw new Error(
       "Cannot reach the Excel AI Copilot backend at " + BACKEND_URL + "."
     );
+  } finally {
+    clearTimeout(timer);
   }
   let data;
   try {
@@ -353,16 +395,18 @@ async function handleSubmit(cmd) {
     const data = await postCommand(payload);
     await handleResponse(cmd, data, false);
   } catch (err) {
+    console.warn("[excel-ai-copilot] command error:", err);
     showError(friendlyError(err));
   } finally {
     state.busy = false;
     setBusy(false);
+    checkBackend();
   }
 }
 
 async function handleResponse(cmd, data, overwrote) {
   if (data.success) {
-    addMessage("bot", data.message);
+    addMessage("bot", humanizeSuccess(data));
 
     const writes = data.writes || { cells: [], sheets: {}, charts: [] };
 
@@ -376,16 +420,14 @@ async function handleResponse(cmd, data, overwrote) {
 
     const blocked = await findBlockedWrites(writes.cells);
     if (blocked && blocked.length) {
-      showConfirm(
-        `${blocked
-          .map((b) => `${b.cell} already contains "${b.current}"`)
-          .join(", ")}.\nReplace it?`,
-        async () => {
-          await applyWrites(writes);
-          addMessage("bot", "Applied the changes to the worksheet.");
-          await finish();
-        }
-      );
+      const detail = blocked
+        .map((b) => `${b.cell} already contains "${groupThousands(formatValue(b.current))}"`)
+        .join(", ");
+      showConfirm(`${detail}.\nContinue?`, async () => {
+        await applyWrites(writes);
+        addMessage("bot", "Applied the changes to the worksheet.");
+        await finish();
+      });
       return;
     }
 
@@ -418,7 +460,7 @@ async function finish() {
     await refreshContext();
   } catch (err) {
     // Non-fatal: the next command will retry the context read.
-    console.warn(err);
+    console.warn("[excel-ai-copilot] context refresh after command failed:", err);
   }
 }
 
@@ -523,17 +565,11 @@ function applyChart(context, ws, chartInfo) {
 async function handleAutoWrite(autoWrite) {
   const { row, column, value } = autoWrite;
   const addr = cellRef(row, column);
-  let current;
-  try {
-    current = await readCell(row, column);
-  } catch (err) {
-    showError("Could not check the destination cell: " + friendlyError(err));
-    return;
-  }
+  const current = await readCell(row, column);
   const write = async () => {
     try {
       await writeValue(row, column, value);
-      addMessage("bot", `Wrote ${formatValue(value)} into ${addr}.`);
+      addMessage("bot", `Wrote ${groupThousands(formatValue(value))} into ${addr}.`);
     } catch (err) {
       showError("Could not write to " + addr + ": " + friendlyError(err));
     }
@@ -542,7 +578,8 @@ async function handleAutoWrite(autoWrite) {
     await write();
   } else {
     showConfirm(
-      `${addr} already contains "${current}". Replace it with ${formatValue(value)}?`,
+      `${addr} already contains "${groupThousands(formatValue(current))}". ` +
+        `Replace it with ${groupThousands(formatValue(value))}?`,
       write
     );
   }
@@ -573,23 +610,30 @@ async function writeValue(row, column, value) {
 /* UI helpers                                                             */
 /* ---------------------------------------------------------------------- */
 
-function addMessage(kind, text, html = false) {
+function addMessage(kind, text) {
   const div = document.createElement("div");
   div.className = "msg " + (kind === "error" ? "error" : kind);
+
   const content = document.createElement("div");
-  if (html) {
-    content.innerHTML = text;
-  } else {
-    content.textContent = text;
-  }
+  content.textContent = text;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  content.appendChild(meta);
   div.appendChild(content);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  state.history.push({ role: kind === "error" ? "error" : kind, text, ts: Date.now() });
   return div;
 }
 
 function showError(text) {
-  addMessage("error", text);
+  addMessage("error", humanizeError(text));
 }
 
 function setBusy(isBusy) {
@@ -600,36 +644,62 @@ function setBusy(isBusy) {
     $("dotA").style.animationDelay = "0s";
     $("dotB").style.animationDelay = "-0.16s";
     $("dotC").style.animationDelay = "-0.32s";
+    typingLabelEl.textContent = "Working in Excel…";
   }
   inputEl.disabled = isBusy;
+  if (!isBusy) inputEl.focus();
 }
 
-function showConfirm(message, onYes) {
-  const div = addMessage("bot", message);
+function showConfirm(detail, onYes) {
+  const div = document.createElement("div");
+  div.className = "msg confirm";
+
+  const warning = document.createElement("div");
+  warning.className = "confirm-warning";
+  warning.textContent = "⚠️ This operation will overwrite existing Excel data.";
+
+  const body = document.createElement("div");
+  body.className = "confirm-body";
+  body.textContent = detail;
+
   const row = document.createElement("div");
   row.className = "confirm-row";
 
-  const yesBtn = document.createElement("button");
-  yesBtn.type = "button";
-  yesBtn.className = "yes";
-  yesBtn.textContent = "Yes, replace";
-  yesBtn.addEventListener("click", async () => {
-    row.remove();
+  const continueBtn = document.createElement("button");
+  continueBtn.type = "button";
+  continueBtn.className = "continue";
+  continueBtn.textContent = "Continue";
+  continueBtn.addEventListener("click", async () => {
+    div.remove();
     await onYes();
   });
 
-  const noBtn = document.createElement("button");
-  noBtn.type = "button";
-  noBtn.className = "no";
-  noBtn.textContent = "No, cancel";
-  noBtn.addEventListener("click", () => {
-    row.remove();
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "cancel";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => {
+    div.remove();
     addMessage("bot", "OK, I didn't change anything.");
   });
 
-  row.appendChild(yesBtn);
-  row.appendChild(noBtn);
+  row.appendChild(continueBtn);
+  row.appendChild(cancelBtn);
+
+  div.appendChild(warning);
+  div.appendChild(body);
   div.appendChild(row);
+
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function clearChat() {
+  if (state.busy) return;
+  messagesEl.querySelectorAll(".msg").forEach((el) => el.remove());
+  state.history = [];
+  welcomeMessage();
 }
 
 function friendlyError(err) {
@@ -641,6 +711,9 @@ function friendlyError(err) {
       BACKEND_URL +
       ". Make sure it is running with 'python main.py --serve --port 5000'."
     );
+  }
+  if (/too long to respond|aborted|timed out|timeout/i.test(msg)) {
+    return "The backend took too long to respond. Please try again.";
   }
   return msg;
 }
@@ -709,10 +782,12 @@ $("commandForm").addEventListener("submit", (e) => {
   handleSubmit(cmd);
 });
 
-document.querySelectorAll("#examplesList li").forEach((li) => {
-  li.addEventListener("click", () => {
+document.querySelectorAll("#quickList .chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
     if (state.busy) return;
-    inputEl.value = li.textContent.trim();
+    inputEl.value = chip.dataset.cmd.trim();
     inputEl.focus();
   });
 });
+
+$("clearChat").addEventListener("click", clearChat);
