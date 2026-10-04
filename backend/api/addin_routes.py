@@ -39,6 +39,8 @@ from openpyxl.utils import get_column_letter
 
 from backend.calculator.engine import CalculationEngine
 from backend.copilot import ExcelCopilot
+from backend.excel.analysis_followup import answer_followup
+from backend.excel.data_analyzer import DataAnalyzer
 from backend.excel.memory_handler import MemoryExcelHandler, is_blank
 from backend.parser.parser import CommandParser
 from backend.validator.validator import Validator
@@ -47,6 +49,20 @@ addin_bp = Blueprint("excel_addin", __name__)
 
 AGGREGATE_OPERATIONS = ("SUM", "AVERAGE", "MIN", "MAX", "COUNT")
 BINARY_OPERATIONS = ("ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "DIFFERENCE", "GROWTH")
+
+#: Hard caps applied to an analysis request, independent of the Add-in's own
+#: snapshot limits. A caller that ignores the task-pane caps still gets a
+#: bounded, fast response.
+MAX_ANALYSIS_ROWS = 5000
+MAX_ANALYSIS_COLS = 100
+
+#: Bytes accepted for an analysis request. The Flask-wide limit is 16MB; the
+#: analyze endpoint is documented as a small JSON payload.
+MAX_ANALYSIS_BODY = 4 * 1024 * 1024
+
+#: Guards against a pathological snapshot (e.g. 5000x100 nested cells) being
+#: walked repeatedly by the analyzer.
+MAX_ANALYSIS_CELLS = 200000
 
 #: Messages raised by the parser when no data source could be resolved.
 #: In that case the Add-in may fall back to commands that operate on the
@@ -147,9 +163,155 @@ def excel_command():
     return jsonify(_error_response_from_copilot(command, result))
 
 
+@addin_bp.route("/analyze", methods=["POST"])
+def excel_analyze():
+    """Profile and analyse a worksheet snapshot. Read-only.
+
+    Accepts the same snapshot the command endpoint uses, so the task pane can
+    reuse its existing capture logic verbatim::
+
+        {
+          "sheet_name": "Sheet1",
+          "origin": {"row": 1, "column": 1},
+          "headers": ["Month", "Revenue", "Expense"],
+          "rows": [["Jan", 1000, 600], ...],
+          "selection": {"address": "A1:C6", "values": [[...]], ...},
+          "question": "which month was highest?"
+        }
+
+    ``question`` is optional: it answers a follow-up against ``analysis``
+    (the report the Add-in keeps in memory) instead of running new analysis.
+
+    Nothing is written to Excel: the response always carries an empty
+    ``writes`` descriptor, and chart output is a *recommendation* only.
+    """
+    if request.content_length and request.content_length > MAX_ANALYSIS_BODY:
+        return jsonify(_analysis_error("The analysis request is too large.")), 413
+
+    payload = request.get_json(force=True, silent=True)
+    if not payload or not isinstance(payload, dict):
+        return jsonify(_analysis_error("Invalid request. Expected a JSON body.")), 400
+
+    question = (payload.get("question") or "").strip()
+    previous = payload.get("analysis")
+
+    if question:
+        answer = answer_followup(question, previous if isinstance(previous, dict) else None)
+        return jsonify(
+            {
+                "success": True,
+                "followup": answer,
+                "message": answer["message"],
+                "chart_command": answer.get("chart_command"),
+                "handled": answer["handled"],
+                "writes": {"cells": [], "sheets": {}, "charts": []},
+            }
+        )
+
+    headers, rows, truncated = _bounded_snapshot(payload)
+    if rows is None:
+        return jsonify(_analysis_error("No data was provided to analyze.")), 400
+
+    selection = payload.get("selection")
+    if not isinstance(selection, dict):
+        selection = None
+
+    try:
+        report = DataAnalyzer.analyze(
+            headers=headers,
+            rows=rows,
+            selection=selection,
+            sheet_name=payload.get("sheet_name") or "Sheet1",
+        )
+    except (TypeError, ValueError) as e:
+        return jsonify(_analysis_error(f"The data could not be analyzed ({e}).")), 400
+
+    report["truncated"] = truncated
+    if truncated and not any("capped" in note for note in report["limitations"]):
+        report["limitations"].insert(
+            0,
+            "The snapshot was capped, so results cover the visible portion only.",
+        )
+    report["message"] = _analysis_message(report)
+    report["writes"] = {"cells": [], "sheets": {}, "charts": []}
+    return jsonify(report)
+
+
 # ---------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------- #
+
+
+def _bounded_snapshot(payload):
+    """Validate and cap an analysis payload.
+
+    Returns ``(headers, rows, truncated)``; ``rows`` is ``None`` when the
+    request carried no usable table.
+    """
+    headers = payload.get("headers")
+    rows = payload.get("rows")
+    if not isinstance(headers, list):
+        headers = []
+    if not isinstance(rows, list):
+        rows = []
+
+    truncated = bool(payload.get("truncated"))
+    if len(headers) > MAX_ANALYSIS_COLS:
+        headers = headers[:MAX_ANALYSIS_COLS]
+        truncated = True
+    if len(rows) > MAX_ANALYSIS_ROWS:
+        rows = rows[:MAX_ANALYSIS_ROWS]
+        truncated = True
+
+    cleaned = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        cleaned.append(row[:MAX_ANALYSIS_COLS])
+        if sum(len(r) for r in cleaned) > MAX_ANALYSIS_CELLS:
+            truncated = True
+            break
+
+    if not cleaned and not headers:
+        return (headers, None, truncated)
+    return (headers, cleaned, truncated)
+
+
+def _analysis_message(report):
+    """One-line, user-facing summary of an analysis report."""
+    profile = report.get("profile") or {}
+    rows = profile.get("rows", 0)
+    columns = profile.get("columns", 0)
+    numeric = len(profile.get("numeric_columns") or [])
+
+    if rows == 0:
+        return "There is no data in this range to analyze."
+
+    parts = [f"Analyzed {rows} row(s) and {columns} column(s)"]
+    if numeric:
+        parts.append(f"including {numeric} numeric column(s)")
+    else:
+        parts.append("but no numeric column was found, so no statistics were computed")
+    if report.get("truncated"):
+        parts.append("the snapshot was capped, so results cover the visible portion only")
+    return ", ".join(parts) + "."
+
+
+def _analysis_error(message):
+    return {
+        "success": False,
+        "message": message,
+        "profile": None,
+        "statistics": [],
+        "growth": [],
+        "trends": [],
+        "anomalies": [],
+        "insights": [],
+        "chart_recommendation": None,
+        "data_quality": None,
+        "limitations": [],
+        "writes": {"cells": [], "sheets": {}, "charts": []},
+    }
 
 
 def _build_snapshot(headers, rows, origin_row, origin_col):

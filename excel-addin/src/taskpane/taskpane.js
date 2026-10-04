@@ -6,7 +6,21 @@
  */
 
 import { buildSnapshot, isEmptyValues } from "./snapshot.mjs";
-import { groupThousands, humanizeSuccess, humanizeError } from "./format.mjs";
+import {
+  groupThousands,
+  humanizeSuccess,
+  humanizeError,
+  isAnalysisRequest,
+  shouldUseStoredAnalysis,
+  analysisHeadline,
+  analysisTableRows,
+  analysisGrowthLines,
+  analysisTrendLines,
+  analysisAnomalyLines,
+  analysisInsightLines,
+  analysisQualityLines,
+  analysisChartPlan,
+} from "./format.mjs";
 
 /* ---------------------------------------------------------------------- */
 /* Configuration                                                          */
@@ -41,6 +55,7 @@ const state = {
   health: "unknown", // unknown | online | offline
   excelConnected: false,
   history: [], // { role, text, ts } -- in-session conversation
+  analysis: null, // last /api/excel/analyze report, for follow-up questions
 };
 
 const $ = (id) => document.getElementById(id);
@@ -357,6 +372,22 @@ async function postCommand(payload) {
 async function handleSubmit(cmd) {
   if (state.busy || !state.ready) return;
 
+  // "analyze this data" (button or typed) always runs a fresh analysis.
+  if (isAnalysisRequest(cmd)) {
+    inputEl.value = "";
+    await handleAnalyze();
+    return;
+  }
+
+  // A question about the data we already analyzed is answered from that
+  // report instead of re-running the command pipeline. A chart command only
+  // counts when it points at the recommendation and names no column, so
+  // "Sales ka chart bana do" still charts Sales.
+  if (state.analysis && shouldUseStoredAnalysis(cmd)) {
+    const answered = await handleFollowup(cmd);
+    if (answered) return;
+  }
+
   state.busy = true;
   setBusy(true);
   addMessage("user", cmd);
@@ -607,6 +638,280 @@ async function writeValue(row, column, value) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Analysis pipeline (read-only)                                          */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * Ask the backend to profile/analyze the current snapshot, or to answer a
+ * follow-up against the previous report. The analyzer never writes to Excel;
+ * the recommended chart is executed through the normal command pipeline.
+ */
+async function postAnalysis(payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error("The analysis took too long. Try a smaller range.");
+    }
+    throw new Error("Cannot reach the Excel AI Copilot backend at " + BACKEND_URL + ".");
+  } finally {
+    clearTimeout(timer);
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error("The backend returned an unreadable response (HTTP " + res.status + ").");
+  }
+  if (data && data.success === false) {
+    throw new Error(data.message || "The data could not be analyzed.");
+  }
+  return data;
+}
+
+function analysisPayload(extra) {
+  const payload = buildPayload("", false);
+  delete payload.command;
+  return Object.assign(payload, extra || {});
+}
+
+async function handleAnalyze() {
+  if (state.busy || !state.ready) return;
+
+  state.busy = true;
+  setBusy(true);
+  setTypingLabel("Analyzing your data…");
+  addMessage("user", "Analyze this data");
+
+  try {
+    await refreshContext();
+
+    if (!state.used || !state.used.values || !state.used.values.length) {
+      showError(
+        "There is no data to analyze — the active worksheet, the sheet scan " +
+          "and your selection are all empty. Add some data first."
+      );
+      return;
+    }
+
+    const data = await postAnalysis(analysisPayload({}));
+    state.analysis = data;
+    addAnalysisCard(data);
+  } catch (err) {
+    console.warn("[excel-ai-copilot] analysis error:", err);
+    showError(friendlyError(err));
+  } finally {
+    state.busy = false;
+    setBusy(false);
+    checkBackend();
+  }
+}
+
+async function handleFollowup(text) {
+  if (state.busy || !state.ready) return false;
+  if (!state.analysis) return false;
+
+  state.busy = true;
+  setBusy(true);
+  setTypingLabel("Checking the analysis…");
+  addMessage("user", text);
+  inputEl.value = "";
+
+  try {
+    const data = await postAnalysis({ question: text, analysis: state.analysis });
+    if (!data.handled) {
+      showError(data.message || "I can't answer that from this analysis.");
+      return;
+    }
+    addMessage("bot", data.message);
+
+    // A chart follow-up still creates the chart, through the normal command
+    // pipeline. handleResponse reports the outcome, so nothing is echoed here.
+    if (data.chart_command) {
+      await runCommand(data.chart_command);
+    }
+  } catch (err) {
+    console.warn("[excel-ai-copilot] follow-up error:", err);
+    showError(friendlyError(err));
+  } finally {
+    state.busy = false;
+    setBusy(false);
+    checkBackend();
+  }
+  return true;
+}
+
+/**
+ * Run a backend command. handleResponse already emits the single success (or
+ * error) message and applies the writes, so this adds nothing of its own.
+ */
+async function runCommand(cmd) {
+  try {
+    const data = await postCommand(buildPayload(cmd, false));
+    await handleResponse(cmd, data, false);
+  } catch (err) {
+    showError(friendlyError(err));
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Analysis card                                                         */
+/* ---------------------------------------------------------------------- */
+
+function addAnalysisCard(report) {
+  const div = document.createElement("div");
+  div.className = "msg analysis";
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "analysis-head";
+  head.setAttribute("aria-expanded", "true");
+
+  const title = document.createElement("span");
+  title.className = "analysis-title";
+  title.textContent = "📊 Data analysis";
+  const summary = document.createElement("span");
+  summary.className = "analysis-summary";
+  summary.textContent = analysisHeadline(report);
+  const caret = document.createElement("span");
+  caret.className = "analysis-caret";
+  caret.textContent = "▾";
+
+  head.appendChild(title);
+  head.appendChild(summary);
+  head.appendChild(caret);
+
+  const body = document.createElement("div");
+  body.className = "analysis-body";
+
+  const insightLines = analysisInsightLines(report);
+  if (insightLines.length) {
+    body.appendChild(section("Key insights", list(insightLines)));
+  }
+
+  const quality = analysisQualityLines(report);
+  if (quality.length) {
+    body.appendChild(section("Data quality", list(quality)));
+  }
+
+  const tableRows = analysisTableRows(report);
+  if (tableRows.length) {
+    const table = document.createElement("table");
+    table.className = "analysis-table";
+    const thead = document.createElement("thead");
+    const hrow = document.createElement("tr");
+    ["Column", "Total", "Average", "Min", "Max"].forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      hrow.appendChild(th);
+    });
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const row of tableRows) {
+      const tr = document.createElement("tr");
+      row.forEach((cell, i) => {
+        const td = document.createElement("td");
+        td.textContent = cell;
+        if (i > 0) td.className = "num";
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    body.appendChild(section("Statistics", table));
+  }
+
+  const growth = analysisGrowthLines(report);
+  if (growth.length) body.appendChild(section("Growth", list(growth)));
+
+  const trends = analysisTrendLines(report);
+  if (trends.length) body.appendChild(section("Trends", list(trends)));
+
+  const anomalies = analysisAnomalyLines(report);
+  if (anomalies.length) body.appendChild(section("Anomalies", list(anomalies)));
+
+  const plan = analysisChartPlan(report);
+  if (plan.available) {
+    const block = document.createElement("div");
+    block.className = "analysis-chart";
+    const label = document.createElement("div");
+    label.className = "analysis-chart-label";
+    label.textContent = "Recommended chart: " + plan.text;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "analysis-chart-btn";
+    btn.textContent = "📈 Create Chart";
+    btn.addEventListener("click", async () => {
+      if (state.busy) return;
+      btn.disabled = true;
+      await runCommand(plan.command);
+      btn.disabled = false;
+    });
+    block.appendChild(label);
+    block.appendChild(btn);
+    body.appendChild(block);
+  }
+
+  const limits = (report.limitations || []).filter(Boolean);
+  if (limits.length) {
+    const note = document.createElement("div");
+    note.className = "analysis-limits";
+    note.textContent = limits.join(" ");
+    body.appendChild(note);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  body.appendChild(meta);
+
+  head.addEventListener("click", () => {
+    const open = body.hidden === false;
+    body.hidden = open;
+    head.setAttribute("aria-expanded", String(!open));
+    caret.textContent = open ? "▸" : "▾";
+  });
+
+  div.appendChild(head);
+  div.appendChild(body);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  state.history.push({ role: "analysis", text: summary.textContent, ts: Date.now() });
+  return div;
+}
+
+function section(title, content) {
+  const wrap = document.createElement("div");
+  wrap.className = "analysis-section";
+  const head = document.createElement("div");
+  head.className = "analysis-section-title";
+  head.textContent = title;
+  wrap.appendChild(head);
+  wrap.appendChild(content);
+  return wrap;
+}
+
+function list(lines) {
+  const ul = document.createElement("ul");
+  ul.className = "analysis-list";
+  for (const line of lines) {
+    const li = document.createElement("li");
+    li.textContent = line;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+/* ---------------------------------------------------------------------- */
 /* UI helpers                                                             */
 /* ---------------------------------------------------------------------- */
 
@@ -648,6 +953,10 @@ function setBusy(isBusy) {
   }
   inputEl.disabled = isBusy;
   if (!isBusy) inputEl.focus();
+}
+
+function setTypingLabel(text) {
+  typingLabelEl.textContent = text;
 }
 
 function showConfirm(detail, onYes) {
@@ -699,6 +1008,7 @@ function clearChat() {
   if (state.busy) return;
   messagesEl.querySelectorAll(".msg").forEach((el) => el.remove());
   state.history = [];
+  state.analysis = null;
   welcomeMessage();
 }
 
@@ -785,6 +1095,10 @@ $("commandForm").addEventListener("submit", (e) => {
 document.querySelectorAll("#quickList .chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     if (state.busy) return;
+    if (chip.id === "analyzeBtn") {
+      handleAnalyze();
+      return;
+    }
     inputEl.value = chip.dataset.cmd.trim();
     inputEl.focus();
   });

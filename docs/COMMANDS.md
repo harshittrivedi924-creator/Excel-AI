@@ -155,6 +155,57 @@ Analysis includes:
 - Trend detection (biggest increases/decreases)
 - Anomaly detection (values > 2 std devs from mean)
 
+## Data Analyst commands (Excel Add-in)
+
+These run against the current Excel selection, or the used range when nothing
+is selected. They are read-only: no analysis command modifies the workbook.
+
+| Trigger | Example |
+|---------|---------|
+| Analyze | `Analyze this data`, `Analyze the selected data` |
+| Analyze (Hinglish) | `Is data ka analysis karo`, `Is data mein kya important hai?` |
+| Insights | `Give me insights` (also answered as a follow-up from a stored report) |
+| Report | `Give me a report` |
+
+### Follow-up questions
+
+Asked after an analysis, answered from the stored report without re-analysing:
+
+| Intent | Example |
+|--------|---------|
+| Highest / lowest period | `Which month had the highest revenue?`, `Which one is lowest?` |
+| Compare columns | `Compare revenue and expenses`, `Revenue vs Expense` |
+| Growth | `Show revenue growth` |
+| Anomalies | `Are there any unusual values?` |
+| Trend | `Show the trend` |
+| Data quality | `Any missing values?`, `Any duplicates?` |
+| Summary | `What is important in this data?`, `insights dedo` (a fresh analysis
+  re-runs analysis rather than using the stored report) |
+| Chart | `Create the recommended chart` |
+
+A chart follow-up (or the **📈 Create Chart** button) is sent through the normal
+command pipeline, so the chart is created in Excel by the existing code. That
+pipeline charts **one column at a time**: a recommendation naming two columns
+(e.g. `Revenue vs Expense by Month`) creates the chart for the first one, and
+the follow-up says so. Run a normal chart command for the other column to add it.
+
+### Analysis limitations
+
+- Statistics cover only the cells in the snapshot or the selection, not the
+  whole sheet, unless the selection is the whole sheet.
+- A column needs at least 3 numeric values for a trend and 4 for outlier
+  detection; below that the answer explains why instead of guessing.
+- Outliers use IQR (1.5×) and z-score (>2σ). Normal variation is not reported
+  as an anomaly.
+- Percentage growth is undefined when the first value is 0; the reason is
+  returned instead of a number.
+- Only bar and column charts can be created, because those are the types the
+  existing chart pipeline supports. The recommendation is limited to those.
+- Very large ranges are capped by the snapshot limit; the response says so and
+  still reports how many rows and columns were analyzed. The add-in caps the
+  snapshot it sends at 3000 rows / 500 columns, so its own requests stay well
+  under the endpoint caps.
+
 ## Hinglish Keywords
 
 | English | Hinglish |
@@ -175,6 +226,7 @@ Analysis includes:
 | filter | filter karo |
 | empty | khali |
 | chart | graph, chart bana |
-| analyze | analyse, report bana |
+| analyze | analyse, report bana, analysis karo |
+| compare | vs, antar, difference between |
 | where | jahan |
 | and | aur |

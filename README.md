@@ -20,6 +20,25 @@ Natural Language Spreadsheet Automation Agent
 - **Hinglish support** with voice input
 - **Web UI** with Excel-file upload and chat sidebar
 
+### AI Data Analyst (Excel Add-in)
+
+Select a range in Excel and ask the Copilot to analyze it. Fully local and
+deterministic — no API key, no external service.
+
+- **Data profiling** — rows, columns, column names, numeric/text/date columns,
+  empty cells, duplicate rows, completeness
+- **Statistics** — sum, average, min, max, median, range and standard deviation
+  are returned by the API; the analysis card shows total, average, min and max
+- **Growth** — first → last value, absolute and percentage change
+- **Trend detection** — increasing / decreasing / flat / mixed (or
+  `insufficient_data`), plus rises, falls and net change
+- **Anomaly detection** — IQR (1.5×) and z-score (>2σ), with the reason
+- **Key insights** — up to 5, each carrying the figures it came from
+- **Chart recommendation** — line or column, with a one-click **Create Chart**
+  (charts the first recommended column; add others with a normal chart command)
+- **Follow-up questions** — "which month was highest?", "show growth",
+  "any unusual values?", "compare revenue and expenses"
+
 ## Installation
 
 ```bash
@@ -88,6 +107,8 @@ docker compose up --build
 | Cleaning | `Dates ko standardize karo` |
 | Chart | `Sales ka chart bana do` |
 | Analysis | `Is workbook ka analysis kar do` |
+| Data analysis | `Analyze this data`, `Is data mein kya important hai?` |
+| Analysis follow-up | `Which month had the highest revenue?`, `Compare revenue and expenses` |
 
 See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command reference.
 
@@ -96,16 +117,17 @@ See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command reference.
 ```
 Excel-AI/
 ├── backend/
-│   ├── api/              # Flask web API
+│   ├── api/              # Flask web API + Excel Add-in API
 │   ├── calculator/       # Calculation engine
-│   ├── excel/            # Excel read/write
+│   ├── excel/            # Excel read/write + data analyzer
 │   ├── parser/           # NL command parser
 │   ├── validator/        # Input validation
 │   ├── voice/            # Speech-to-text
 │   └── copilot.py        # Main orchestrator
+├── excel-addin/          # Office.js add-in (manifest, task pane, build)
 ├── frontend/             # Web UI (HTML/CSS/JS)
-├── tests/                # 129 unit & integration tests
-├── docs/                 # Architecture, commands, API docs
+├── tests/                # 281 unit & integration tests
+├── docs/                 # Architecture, commands, API, add-in
 ├── main.py               # CLI entry point
 ├── requirements.txt
 ├── Dockerfile
@@ -116,18 +138,22 @@ Excel-AI/
 ## Testing
 
 ```bash
-# Run all 129 tests
+# Run all 281 Python tests
 pytest tests/ -v
 
 # Run a specific test file
 pytest tests/test_integration.py -v
+
+# Excel Add-in unit tests
+cd excel-addin && npm test
 ```
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — System design & data flow
 - [Command Reference](docs/COMMANDS.md) — All commands & Hinglish keywords
-- [REST API](docs/API.md) — Web API endpoints
+- [REST API](docs/API.md) — Web API and Excel Add-in endpoints
+- [Excel Add-in](docs/EXCEL_ADDIN.md) — Sideloading, API contract, manual tests
 
 ## License
 

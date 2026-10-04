@@ -257,6 +257,162 @@ body {
   color: #dbeafe;
 }
 
+/* Analysis card */
+.msg.analysis {
+  align-self: stretch;
+  max-width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid #3b82f6;
+  border-radius: 12px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.analysis-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+}
+
+.analysis-head:hover {
+  background: #f8fafc;
+}
+
+.analysis-title {
+  font-weight: 700;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.analysis-summary {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-caret {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.analysis-body {
+  padding: 0 12px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analysis-body[hidden] {
+  display: none;
+}
+
+.analysis-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.analysis-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.analysis-list li {
+  margin-bottom: 3px;
+}
+
+.analysis-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.analysis-table th,
+.analysis-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 3px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.analysis-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.analysis-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed #93c5fd;
+  border-radius: 9px;
+  background: #eff6ff;
+}
+
+.analysis-chart-label {
+  font-size: 12px;
+  color: #1e3a8a;
+  font-weight: 600;
+}
+
+.analysis-chart-btn {
+  border: none;
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.analysis-chart-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.analysis-chart-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.analysis-limits {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+}
+
+.chip-analyze {
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #fff;
+  font-weight: 700;
+}
+
 /* Confirmation card */
 .msg.confirm {
   align-self: stretch;
